@@ -8,7 +8,7 @@ read_when:
 
 # Providers
 
-CodexBar currently registers 69 provider IDs. Some companies expose multiple surfaces, such as Codex vs OpenAI API or
+CodexBar currently registers 70 provider IDs. Some companies expose multiple surfaces, such as Codex vs OpenAI API or
 OpenCode vs OpenCode Go, because the auth source and quota shape differ.
 
 ## Fetch strategies (current)
@@ -88,6 +88,7 @@ complete when the available scan window covers fewer days.
 | Ollama | API key verifies Cloud API access (`api`); browser cookies expose Cloud quota windows (`web`). |
 | Synthetic | API key from config/env → quota API (`api`). |
 | OpenRouter | API token (config, overrides env) → credits API (`api`). |
+| Hugging Face | API token from config/env or token accounts → personal billing usage API (`api`). |
 | Perplexity | Browser cookies/manual cookie/env session token → credits API (`web`). |
 | Xiaomi MiMo | Browser cookies → balance/token plan endpoints (`web`). |
 | Doubao | API key from config/env → Volcengine Ark chat-completions probe (`api`). |
@@ -412,6 +413,16 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 - Override base URL with `OPENROUTER_API_URL` env var.
 - Status: `https://status.openrouter.ai` (link only, no auto-polling yet).
 - Details: `docs/openrouter.md`.
+
+## Hugging Face
+- API token from `~/.codexbar/config.json` (`providers[].apiKey`), token accounts, or `HF_TOKEN`.
+- Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads personal-account billing usage from
+  `GET https://huggingface.co/api/users/{username}/billing/usage/live`.
+- Shows exact current billing-period spend in USD and a top-level usage-category breakdown. A parsed billing-period
+  end is used as the reset date.
+- Included credits are not converted into a quota or balance, and no synthetic daily cost history is emitted.
+- Browser cookies, local Hugging Face token files, organization billing, and other billing scopes are not used.
+- Status: none yet.
 
 ## Perplexity
 - Browser session cookie from automatic import, manual header/token, or `PERPLEXITY_SESSION_TOKEN` / `PERPLEXITY_COOKIE`.
