@@ -46,7 +46,8 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.providerCost?.used == 0)
         #expect(snapshot.providerCost?.limit == 0)
         #expect(snapshot.costUsage == nil)
-        #expect(snapshot.details.last?.rows == [.init(label: "Inference", value: "$0.00")])
+        #expect(snapshot.details.last?.rows.map(\.label) == ["Inference"])
+        #expect(snapshot.details.last?.rows.map(\.value) == ["$0.00"])
         #expect(snapshot.dataConfidence == .exact)
     }
 
