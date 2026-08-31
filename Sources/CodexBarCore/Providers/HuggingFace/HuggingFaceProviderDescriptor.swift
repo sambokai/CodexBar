@@ -28,7 +28,7 @@ public enum HuggingFaceProviderDescriptor {
                 opusLabel: nil,
                 supportsOpus: false,
                 supportsCredits: false,
-                creditsHint: "Current billing-period spend from Hugging Face",
+                creditsHint: "Current Hugging Face billing-period spend",
                 toggleTitle: "Show Hugging Face usage",
                 cliName: "huggingface",
                 defaultEnabled: false,
@@ -72,7 +72,6 @@ public enum HuggingFaceProviderDescriptor {
                     bundledPlugin: "huggingface",
                     secretKey: HuggingFaceSettingsReader.tokenEnvironmentKey,
                     sourceLabel: "api",
-                    transport: HuggingFaceProviderHTTPTransport(),
                     resolveSecret: { environment in
                         self.credentials.resolveToken(environment: environment)?.token
                     },
