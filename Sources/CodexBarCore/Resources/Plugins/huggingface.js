@@ -68,20 +68,20 @@ defineProvider({
       }
     }
 
-    function parsePeriod(period, field) {
-      const value = object(period, field);
-      const periodStartText = requiredString(value.periodStart, `${field}.periodStart`);
-      const periodEndText = requiredString(value.periodEnd, `${field}.periodEnd`);
+    function parsePeriod(period) {
+      const value = object(period, "billing.period");
+      const periodStartText = requiredString(value.periodStart, "billing.period.periodStart");
+      const periodEndText = requiredString(value.periodEnd, "billing.period.periodEnd");
       let periodStart;
       let periodEnd;
       try {
         periodStart = ctx.date.iso(periodStartText);
         periodEnd = ctx.date.iso(periodEndText);
       } catch {
-        parseFailure(`${field}.periodStart and ${field}.periodEnd must be valid ISO-8601 dates`);
+        parseFailure("billing.period.periodStart and billing.period.periodEnd must be valid ISO-8601 dates");
       }
       if (periodEnd.getTime() < periodStart.getTime()) {
-        parseFailure(`${field}.periodEnd must not precede ${field}.periodStart`);
+        parseFailure("billing.period.periodEnd must not precede billing.period.periodStart");
       }
       return { periodStart, periodEnd };
     }
@@ -96,6 +96,30 @@ defineProvider({
       return value;
     }
 
+    function addCosts(total, cost, field) {
+      const next = total + cost;
+      if (!Number.isFinite(next) || next > Number.MAX_SAFE_INTEGER) {
+        parseFailure(`${field} total exceeds the safe numeric range`);
+      }
+      return next;
+    }
+
+    function categoryLabel(value) {
+      const normalized = value
+        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+        .replace(/[_-]+/g, " ")
+        .trim();
+      if (!normalized) return "Unknown";
+      return normalized.replace(/\b\w/g, (character) => character.toUpperCase());
+    }
+
+    function compareRows(a, b) {
+      if (a.costMicroUSD !== b.costMicroUSD) return b.costMicroUSD - a.costMicroUSD;
+      if (a.label < b.label) return -1;
+      if (a.label > b.label) return 1;
+      return 0;
+    }
+
     const profile = object(await getJSON(`${root}/api/whoami-v2`, "identity"), "identity response");
     const username = requiredString(profile.name, "identity.name");
     const email = optionalString(profile.email, "identity.email");
@@ -103,52 +127,70 @@ defineProvider({
       parseFailure("identity.isPro must be a boolean");
     }
     const isPro = profile.isPro === true;
-    const billing = object(await getJSON(`${root}/api/settings/billing/usage/live`, "billing"), "billing response");
-    const inference = object(billing.inference, "inference");
-    const jobs = object(billing.jobs, "jobs");
-    const inferencePeriod = parsePeriod(inference, "inference");
-    const jobsPeriod = parsePeriod(jobs, "jobs");
-    const inferenceNanoUSD = finiteNonnegativeCost(inference.usedNanoUsd, "inference.usedNanoUsd");
-    const jobsMicroUSD = finiteNonnegativeCost(jobs.usedMicroUsd, "jobs.usedMicroUsd");
-    const inferenceUSD = inferenceNanoUSD / 1_000_000_000;
-    const jobsUSD = jobsMicroUSD / 1_000_000;
-    if (!Number.isFinite(inferenceUSD) || !Number.isFinite(jobsUSD)) {
-      parseFailure("billing cost total overflowed");
+
+    const billing = object(await getJSON(`${root}/api/settings/billing/usage`, "billing"), "billing response");
+    const period = parsePeriod(billing.period);
+    const usage = object(billing.usage, "billing.usage");
+    const categoryRows = [];
+    let totalMicroUSD = 0;
+    for (const category of Object.keys(usage)) {
+      const items = usage[category];
+      if (!Array.isArray(items)) {
+        parseFailure(`billing.usage.${category} must be an array`);
+      }
+      let categoryTotalMicroUSD = 0;
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+        object(item, `billing.usage.${category}[${index}]`);
+        const cost = finiteNonnegativeCost(
+          item.totalCostMicroUSD,
+          `billing.usage.${category}[${index}].totalCostMicroUSD`,
+        );
+        categoryTotalMicroUSD = addCosts(categoryTotalMicroUSD, cost, `billing.usage.${category}`);
+      }
+      totalMicroUSD = addCosts(totalMicroUSD, categoryTotalMicroUSD, "billing.usage");
+      categoryRows.push({
+        label: categoryLabel(category),
+        costMicroUSD: categoryTotalMicroUSD,
+      });
     }
 
-    const plan = isPro ? "PRO" : "Free";
-    const inferenceStartLabel = inferencePeriod.periodStart.toISOString().slice(0, 10);
-    const inferenceEndLabel = inferencePeriod.periodEnd.toISOString().slice(0, 10);
-    const jobsStartLabel = jobsPeriod.periodStart.toISOString().slice(0, 10);
-    const jobsEndLabel = jobsPeriod.periodEnd.toISOString().slice(0, 10);
+    const totalUSD = totalMicroUSD / 1_000_000;
+    if (!Number.isFinite(totalUSD)) parseFailure("billing cost total overflowed");
+    categoryRows.sort(compareRows);
+
+    const periodStartLabel = period.periodStart.toISOString().slice(0, 10);
+    const periodEndLabel = period.periodEnd.toISOString().slice(0, 10);
+    const identity = {
+      email: email || undefined,
+      accountID: username,
+    };
+    if (isPro) identity.loginMethod = "PRO";
+
     return {
       cost: {
-        used: inferenceUSD,
+        used: totalUSD,
         currency: "USD",
-        period: "Inference billing period",
-        resetsAt: inferencePeriod.periodEnd,
+        period: "Current billing period",
+        resetsAt: period.periodEnd,
       },
-      identity: {
-        email: email || undefined,
-        accountID: username,
-        loginMethod: plan,
-      },
+      identity,
       dataConfidence: "exact",
       details: [
         {
           title: "Billing summary",
           rows: [
-            { label: "Inference period", value: `${inferenceStartLabel} – ${inferenceEndLabel}` },
-            { label: "Inference spend", value: ctx.format.usd(inferenceUSD) },
-            { label: "Plan", value: plan },
+            { label: "Current period", value: `${periodStartLabel} – ${periodEndLabel}` },
+            { label: "Current spend", value: ctx.format.usd(totalUSD) },
+            ...(isPro ? [{ label: "Plan", value: "PRO" }] : []),
           ],
         },
         {
-          title: "Jobs billing",
-          rows: [
-            { label: "Jobs period", value: `${jobsStartLabel} – ${jobsEndLabel}` },
-            { label: "Jobs spend", value: ctx.format.usd(jobsUSD) },
-          ],
+          title: "Usage breakdown",
+          rows: categoryRows.map((row) => ({
+            label: row.label,
+            value: ctx.format.usd(row.costMicroUSD / 1_000_000),
+          })),
         },
       ],
     };
