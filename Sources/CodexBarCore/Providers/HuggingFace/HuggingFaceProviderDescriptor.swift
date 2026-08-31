@@ -28,7 +28,7 @@ public enum HuggingFaceProviderDescriptor {
                 opusLabel: nil,
                 supportsOpus: false,
                 supportsCredits: false,
-                creditsHint: "Current Hugging Face billing-period spend",
+                creditsHint: "Spend reported by Hugging Face billing",
                 toggleTitle: "Show Hugging Face usage",
                 cliName: "huggingface",
                 defaultEnabled: false,
@@ -50,7 +50,8 @@ public enum HuggingFaceProviderDescriptor {
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: false,
                 noDataMessage: {
-                    "Hugging Face billing reports current-period spend; exact daily request history is not exposed."
+                    "Hugging Face billing reports spend for returned categories; " +
+                        "this integration does not provide daily request history."
                 }),
             presentation: ProviderUsagePresentation(
                 costPresenter: { _ in ProviderCostPresentation(menuCardStyle: .apiSpend) },
