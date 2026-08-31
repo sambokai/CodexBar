@@ -128,6 +128,8 @@ defineProvider({
     }
     const isPro = profile.isPro === true;
 
+    // This settings response is the selected finite billing source. Sum only the categories it returns;
+    // do not infer whole-account coverage or credits from other Hugging Face billing routes.
     const billing = object(await getJSON(`${root}/api/settings/billing/usage`, "billing"), "billing response");
     const period = parsePeriod(billing.period);
     const usage = object(billing.usage, "billing.usage");
@@ -171,7 +173,7 @@ defineProvider({
       cost: {
         used: totalUSD,
         currency: "USD",
-        period: "Current billing period",
+        period: "Reported billing period",
         resetsAt: period.periodEnd,
       },
       identity,
@@ -180,8 +182,8 @@ defineProvider({
         {
           title: "Billing summary",
           rows: [
-            { label: "Current period", value: `${periodStartLabel} – ${periodEndLabel}` },
-            { label: "Current spend", value: ctx.format.usd(totalUSD) },
+            { label: "Billing period", value: `${periodStartLabel} – ${periodEndLabel}` },
+            { label: "Reported spend", value: ctx.format.usd(totalUSD) },
             ...(isPro ? [{ label: "Plan", value: "PRO" }] : []),
           ],
         },
