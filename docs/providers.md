@@ -88,7 +88,7 @@ complete when the available scan window covers fewer days.
 | Ollama | API key verifies Cloud API access (`api`); browser cookies expose Cloud quota windows (`web`). |
 | Synthetic | API key from config/env → quota API (`api`). |
 | OpenRouter | API token (config, overrides env) → credits API (`api`). |
-| Hugging Face | API token from config/env or token accounts → personal billing usage API (`api`). |
+| Hugging Face | API token from config/env or token accounts → finite personal billing usage API (`api`). |
 | Perplexity | Browser cookies/manual cookie/env session token → credits API (`web`). |
 | Xiaomi MiMo | Browser cookies → balance/token plan endpoints (`web`). |
 | Doubao | API key from config/env → Volcengine Ark chat-completions probe (`api`). |
@@ -416,15 +416,15 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 
 ## Hugging Face
 - API token from `~/.codexbar/config.json` (`providers[].apiKey`), token accounts, or `HF_TOKEN`.
-- Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads the first `usage` event from the
-  bearer-authenticated SSE endpoint `GET https://huggingface.co/api/settings/billing/usage/live`.
-- Shows exact inference billing-period spend in USD and jobs spend separately, because Hugging Face reports those
-  services with independent billing periods. The corresponding parsed period ends are used as reset dates/details.
-- The billing stream is bounded and closed after a complete `usage` event; an incomplete or malformed event is an
-  error rather than a partial snapshot.
+- Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads finite JSON from
+  `GET https://huggingface.co/api/settings/billing/usage`.
+- Shows exact personal billing-period spend in USD by summing validated `totalCostMicroUSD` line items within the
+  API's single reported period. Category totals appear separately in the usage breakdown, and the period end is
+  used as the reset date.
 - Included credits are not converted into a quota or balance, and no synthetic daily cost history is emitted.
 - Storage, rate limits, and ZeroGPU fields are not interpreted as spend. Browser cookies, local Hugging Face token
-  files, organization billing, and other billing scopes are not used.
+  files, organization billing, and other billing scopes are not used. The finite billing response does not require
+  browser session state.
 - Status: none yet.
 
 ## Perplexity
