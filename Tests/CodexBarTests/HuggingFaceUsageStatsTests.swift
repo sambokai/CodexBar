@@ -398,11 +398,14 @@ struct HuggingFaceUsageStatsTests {
     {
         ProviderHTTPTransportStub { request in
             let url = try #require(request.url)
-            let isBilling = url.path == "/api/settings/billing/usage"
-            return try Self.response(
-                url: url,
-                body: isBilling ? billingBody : profileBody,
-                statusCode: isBilling ? billingStatus : profileStatus)
+            switch url.path {
+            case "/api/whoami-v2":
+                return try Self.response(url: url, body: profileBody, statusCode: profileStatus)
+            case "/api/settings/billing/usage":
+                return try Self.response(url: url, body: billingBody, statusCode: billingStatus)
+            default:
+                throw ProviderPluginError.script("Unexpected Hugging Face fixture path: \(url.path)")
+            }
         }
     }
 
