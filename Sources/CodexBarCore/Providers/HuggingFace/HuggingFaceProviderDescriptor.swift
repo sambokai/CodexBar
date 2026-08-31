@@ -72,6 +72,7 @@ public enum HuggingFaceProviderDescriptor {
                     bundledPlugin: "huggingface",
                     secretKey: HuggingFaceSettingsReader.tokenEnvironmentKey,
                     sourceLabel: "api",
+                    transport: HuggingFaceProviderHTTPTransport(),
                     resolveSecret: { environment in
                         self.credentials.resolveToken(environment: environment)?.token
                     },
