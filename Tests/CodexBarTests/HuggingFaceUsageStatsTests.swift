@@ -22,7 +22,7 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.costUsage == nil)
         #expect(snapshot.providerCost?.used == 2.41)
         #expect(snapshot.providerCost?.currencyCode == "USD")
-        #expect(snapshot.providerCost?.period == "Current billing period")
+        #expect(snapshot.providerCost?.period == "Reported billing period")
         #expect(snapshot.providerCost?.resetsAt == Self.date("2026-09-01T00:00:00Z"))
         #expect(snapshot.providerCost?.limit == 0)
         #expect(snapshot.providerCost?.balance == nil)
@@ -32,12 +32,33 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.identity?.accountEmail == "fixture@example.com")
         #expect(snapshot.identity?.accountID == "fixture-user")
         #expect(snapshot.identity?.loginMethod == "PRO")
-        #expect(snapshot.detailRow(label: "Current period")?.value == "2026-08-01 – 2026-09-01")
-        #expect(snapshot.detailRow(label: "Current spend")?.value == "$2.41")
+        #expect(snapshot.detailRow(label: "Billing period")?.value == "2026-08-01 – 2026-09-01")
+        #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
         #expect(snapshot.detailRow(label: "Plan")?.value == "PRO")
         #expect(snapshot.details.map(\.title) == ["Billing summary", "Usage breakdown"])
         #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
         #expect(snapshot.details.last?.rows.map(\.value) == ["$1.75", "$0.66"])
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `billing parser reports only the selected usage endpoint categories`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let transport = Self.transport()
+        let snapshot = try await Self.fetch(engine: engine, transport: transport)
+        let requests = await transport.requests()
+
+        #expect(snapshot.providerCost?.period == "Reported billing period")
+        #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
+        #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
+        #expect(requests.map { $0.url?.path } == [
+            "/api/whoami-v2",
+            "/api/settings/billing/usage",
+        ])
+        #expect(requests.allSatisfy { $0.url?.path != "/api/settings/billing/usage-v2" })
+        #expect(snapshot.primary == nil)
+        #expect(snapshot.secondary == nil)
+        #expect(snapshot.costUsage == nil)
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
@@ -50,7 +71,7 @@ struct HuggingFaceUsageStatsTests {
             billingBody: Self.billingBody(usage: usage))
 
         #expect(snapshot.providerCost?.used == 8.888888)
-        #expect(snapshot.providerCost?.period == "Current billing period")
+        #expect(snapshot.providerCost?.period == "Reported billing period")
         #expect(snapshot.providerCost?.resetsAt == Self.date("2026-09-01T00:00:00Z"))
         #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
         #expect(snapshot.details.last?.rows.map(\.value) == ["$7.65", "$1.23"])
@@ -64,7 +85,7 @@ struct HuggingFaceUsageStatsTests {
             billingBody: Self.billingBody(usage: Self.usageBody(endpoints: "[]", spaces: "[]")))
 
         #expect(snapshot.providerCost?.used == 0)
-        #expect(snapshot.providerCost?.period == "Current billing period")
+        #expect(snapshot.providerCost?.period == "Reported billing period")
         #expect(snapshot.providerCost?.limit == 0)
         #expect(snapshot.costUsage == nil)
         #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
@@ -280,7 +301,7 @@ struct HuggingFaceUsageStatsTests {
         #expect(descriptor.metadata.widgetSelectable == false)
         #expect(descriptor.metadata.isPrimaryProvider == false)
         #expect(descriptor.metadata.supportsCredits == false)
-        #expect(descriptor.metadata.creditsHint == "Current Hugging Face billing-period spend")
+        #expect(descriptor.metadata.creditsHint == "Spend reported by Hugging Face billing")
         #expect(descriptor.tokenCost.supportsTokenCost == false)
         #expect(descriptor.fetchPlan.sourceModes == [.auto, .api])
         #expect(descriptor.cli.name == "huggingface")
@@ -320,7 +341,7 @@ struct HuggingFaceUsageStatsTests {
                 used: 2.41,
                 limit: 0,
                 currencyCode: "USD",
-                period: "Current billing period",
+                period: "Reported billing period",
                 resetsAt: Self.date("2026-09-01T00:00:00Z"),
                 updatedAt: now),
             updatedAt: now)
@@ -347,7 +368,7 @@ struct HuggingFaceUsageStatsTests {
             now: now))
 
         #expect(model.providerCost?.title == "API spend")
-        #expect(model.providerCost?.spendLine == "Current billing period: $2.41")
+        #expect(model.providerCost?.spendLine == "Reported billing period: $2.41")
     }
 
     private static func fetch(
