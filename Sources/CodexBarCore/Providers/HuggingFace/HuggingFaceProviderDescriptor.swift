@@ -53,6 +53,8 @@ public enum HuggingFaceProviderDescriptor {
                     "Hugging Face billing reports current-period spend; exact daily request history is not exposed."
                 }),
             presentation: ProviderUsagePresentation(
+                costPresenter: { _ in ProviderCostPresentation(menuCardStyle: .apiSpend) },
+                menuCard: ProviderMenuCardPresentation(providerCostIsRequiredUsage: true),
                 optionalDetails: ProviderOptionalDetailsPresentation(
                     costSummaryTitles: ["Billing summary"])),
             fetchPlan: self.fetchPlan(),
