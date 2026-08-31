@@ -22,47 +22,52 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.costUsage == nil)
         #expect(snapshot.providerCost?.used == 1.75)
         #expect(snapshot.providerCost?.currencyCode == "USD")
-        #expect(snapshot.providerCost?.period == "Current billing period")
+        #expect(snapshot.providerCost?.period == "Inference billing period")
         #expect(snapshot.providerCost?.resetsAt == Self.date("2026-09-01T00:00:00Z"))
+        #expect(snapshot.providerCost?.limit == 0)
+        #expect(snapshot.providerCost?.balance == nil)
+        #expect(snapshot.providerCost?.nextRegenAmount == nil)
         #expect(snapshot.dataConfidence == .exact)
         #expect(snapshot.identity?.providerID == .huggingface)
         #expect(snapshot.identity?.accountEmail == "fixture@example.com")
         #expect(snapshot.identity?.accountID == "fixture-user")
         #expect(snapshot.identity?.loginMethod == "PRO")
-        #expect(snapshot.detailRow(label: "Current period")?.value == "2026-08-01 – 2026-09-01")
-        #expect(snapshot.detailRow(label: "Current spend")?.value == "$1.75")
+        #expect(snapshot.detailRow(label: "Inference period")?.value == "2026-08-01 – 2026-09-01")
+        #expect(snapshot.detailRow(label: "Inference spend")?.value == "$1.75")
         #expect(snapshot.detailRow(label: "Plan")?.value == "PRO")
-        #expect(snapshot.details.last?.title == "Usage breakdown")
-        #expect(snapshot.details.last?.rows.map(\.label) == ["Inference", "Spaces Serverless"])
-        #expect(snapshot.details.last?.rows.map(\.value) == ["$1.25", "$0.50"])
+        #expect(snapshot.details.last?.title == "Jobs billing")
+        #expect(snapshot.details.last?.rows.map(\.label) == ["Jobs period", "Jobs spend"])
+        #expect(snapshot.details.last?.rows.map(\.value) == ["2026-08-15 – 2026-09-15", "$0.66"])
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
     func `zero free usage remains a valid exact spend snapshot`(engine: ProviderPluginEngineKind) async throws {
         let billing = Self.billingBody(
-            usage: #"{"inference":[{"freeGrant":true,"totalCostMicroUSD":0}]}"#)
+            inference: #"{"usedNanoUsd":0,"periodStart":"2026-08-01T00:00:00Z","periodEnd":"2026-09-01T00:00:00Z"}"#,
+            jobs: #"{"usedMicroUsd":0,"periodStart":"2026-08-15T00:00:00Z","periodEnd":"2026-09-15T00:00:00Z"}"#)
         let snapshot = try await Self.fetch(engine: engine, billingBody: billing)
 
         #expect(snapshot.providerCost?.used == 0)
         #expect(snapshot.providerCost?.limit == 0)
         #expect(snapshot.costUsage == nil)
-        #expect(snapshot.details.last?.rows == [.init(label: "Inference", value: "$0.00")])
+        #expect(snapshot.details.last?.rows.map(\.label) == ["Jobs period", "Jobs spend"])
+        #expect(snapshot.details.last?.rows.map(\.value) == ["2026-08-15 – 2026-09-15", "$0.00"])
         #expect(snapshot.dataConfidence == .exact)
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
     func `malformed cost values are classified as parse failures`(engine: ProviderPluginEngineKind) async throws {
-        let usageBodies = [
-            #"{"inference":[{"totalCostMicroUSD":"1"}]}"#,
-            #"{"inference":[{"totalCostMicroUSD":-1}]}"#,
-            #"{"inference":[{}]}"#,
-            #"{"inference":[{"totalCostMicroUSD":1e309}]}"#,
+        let inferenceBodies = [
+            #"{"usedNanoUsd":"1"}"#,
+            #"{"usedNanoUsd":-1}"#,
+            #"{}"#,
+            #"{"usedNanoUsd":1e309}"#,
         ]
 
-        for usage in usageBodies {
+        for inference in inferenceBodies {
             do {
-                _ = try await Self.fetch(engine: engine, billingBody: Self.billingBody(usage: usage))
-                Issue.record("Expected malformed Hugging Face cost to fail: \(usage)")
+                _ = try await Self.fetch(engine: engine, billingBody: Self.billingBody(inference: inference))
+                Issue.record("Expected malformed Hugging Face cost to fail: \(inference)")
             } catch let error as ProviderFetchClassifiedError {
                 #expect(error.kind == .parseFailure)
             } catch {
@@ -75,15 +80,15 @@ struct HuggingFaceUsageStatsTests {
     func `malformed usage categories and billing dates are classified as parse failures`(
         engine: ProviderPluginEngineKind) async throws
     {
-        let malformedUsage = [
+        let malformedInference = [
             #"[]"#,
-            #"{"inference":{}}"#,
-            #"{"inference":[null]}"#,
+            #"{"usedNanoUsd":1}"#,
+            #"{"usedNanoUsd":null}"#,
         ]
-        for usage in malformedUsage {
+        for inference in malformedInference {
             do {
-                _ = try await Self.fetch(engine: engine, billingBody: Self.billingBody(usage: usage))
-                Issue.record("Expected malformed Hugging Face usage to fail: \(usage)")
+                _ = try await Self.fetch(engine: engine, billingBody: Self.billingBody(inference: inference))
+                Issue.record("Expected malformed Hugging Face inference data to fail: \(inference)")
             } catch let error as ProviderFetchClassifiedError {
                 #expect(error.kind == .parseFailure)
             } catch {
@@ -91,9 +96,26 @@ struct HuggingFaceUsageStatsTests {
             }
         }
 
+        let malformedJobs = [
+            #"{"usedMicroUsd":"1","periodStart":"2026-08-15T00:00:00Z","periodEnd":"2026-09-15T00:00:00Z"}"#,
+            #"{"usedMicroUsd":-1,"periodStart":"2026-08-15T00:00:00Z","periodEnd":"2026-09-15T00:00:00Z"}"#,
+            #"{"periodStart":"2026-08-15T00:00:00Z","periodEnd":"2026-09-15T00:00:00Z"}"#,
+            #"{"usedMicroUsd":1e309,"periodStart":"2026-08-15T00:00:00Z","periodEnd":"2026-09-15T00:00:00Z"}"#,
+            #"{"usedMicroUsd":1,"periodStart":"2026-09-15T00:00:00Z","periodEnd":"2026-08-15T00:00:00Z"}"#,
+        ]
+        for jobs in malformedJobs {
+            do {
+                _ = try await Self.fetch(engine: engine, billingBody: Self.billingBody(jobs: jobs))
+                Issue.record("Expected malformed Hugging Face jobs data to fail: \(jobs)")
+            } catch let error as ProviderFetchClassifiedError {
+                #expect(error.kind == .parseFailure)
+            } catch {
+                Issue.record("Unexpected Hugging Face jobs error: \(error)")
+            }
+        }
+
         let malformedDate = Self.billingBody(
-            usage: #"{"inference":[{"totalCostMicroUSD":1}]}"#,
-            periodStart: "not-a-date")
+            inference: #"{"usedNanoUsd":1,"periodStart":"not-a-date","periodEnd":"2026-09-01T00:00:00Z"}"#)
         do {
             _ = try await Self.fetch(engine: engine, billingBody: malformedDate)
             Issue.record("Expected malformed Hugging Face period date to fail")
@@ -101,6 +123,17 @@ struct HuggingFaceUsageStatsTests {
             #expect(error.kind == .parseFailure)
         } catch {
             Issue.record("Unexpected Hugging Face error: \(error)")
+        }
+
+        let reversedInference = Self.billingBody(
+            inference: #"{"usedNanoUsd":1,"periodStart":"2026-09-01T00:00:00Z","periodEnd":"2026-08-01T00:00:00Z"}"#)
+        do {
+            _ = try await Self.fetch(engine: engine, billingBody: reversedInference)
+            Issue.record("Expected reversed Hugging Face inference dates to fail")
+        } catch let error as ProviderFetchClassifiedError {
+            #expect(error.kind == .parseFailure)
+        } catch {
+            Issue.record("Unexpected Hugging Face inference date error: \(error)")
         }
     }
 
@@ -126,6 +159,11 @@ struct HuggingFaceUsageStatsTests {
             } catch let error as ProviderFetchClassifiedError {
                 #expect(error.kind == expectedKind)
                 #expect(!error.message.contains("hf_fixture_token"))
+                if resource == "billing", status == 401 {
+                    #expect(error.message.contains("personal billing usage"))
+                } else if resource == "identity", status == 401 {
+                    #expect(error.message.contains("user access token"))
+                }
             } catch {
                 Issue.record("Unexpected Hugging Face HTTP error: \(error)")
             }
@@ -143,9 +181,9 @@ struct HuggingFaceUsageStatsTests {
         #expect(requests.count == 2)
         #expect(requests.map { $0.url?.path } == [
             "/api/whoami-v2",
-            "/api/users/fixture-user/billing/usage/live",
+            "/api/settings/billing/usage/live",
         ])
-        for request in requests {
+        for (index, request) in requests.enumerated() {
             let url = try #require(request.url)
             #expect(url.scheme == "https")
             #expect(url.host == "huggingface.co")
@@ -155,18 +193,20 @@ struct HuggingFaceUsageStatsTests {
             #expect(request.httpMethod == "GET")
             #expect(request.httpBody == nil)
             #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer hf_fixture_token")
-            #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+            #expect(request
+                .value(forHTTPHeaderField: "Accept") == (index == 1 ? "text/event-stream" : "application/json"))
             #expect(!url.absoluteString.contains("hf_fixture_token"))
         }
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
-    func `user names are encoded as one billing path segment`(engine: ProviderPluginEngineKind) async throws {
+    func `billing endpoint is account independent`(engine: ProviderPluginEngineKind) async throws {
         let transport = Self.transport(profileBody: #"{"name":"fixture/user?x","email":"fixture@example.com"}"#)
         _ = try await Self.fetch(engine: engine, transport: transport)
         let requests = await transport.requests()
         let billingRequest = try #require(requests.last)
-        #expect(billingRequest.url?.absoluteString.contains("/api/users/fixture%2Fuser%3Fx/billing/usage/live") == true)
+        #expect(billingRequest.url?.path == "/api/settings/billing/usage/live")
+        #expect(billingRequest.url?.absoluteString.contains("fixture") == false)
     }
 
     @Test
@@ -231,7 +271,7 @@ struct HuggingFaceUsageStatsTests {
         let runtime = try BundledPluginTestSupport.runtime(
             "huggingface",
             engine: engine,
-            transport: transport)
+            transport: HuggingFaceProviderHTTPTransport(transport: transport))
         return try await runtime.fetchUsage(
             secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
             now: Date(timeIntervalSince1970: 1_777_000_000))
@@ -245,7 +285,7 @@ struct HuggingFaceUsageStatsTests {
     {
         ProviderHTTPTransportStub { request in
             let url = try #require(request.url)
-            let isBilling = url.path.contains("/billing/usage/live")
+            let isBilling = url.path == "/api/settings/billing/usage/live"
             return try Self.response(
                 url: url,
                 body: isBilling ? billingBody : profileBody,
@@ -258,7 +298,9 @@ struct HuggingFaceUsageStatsTests {
             url: url,
             statusCode: statusCode,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]))
+            headerFields: ["Content-Type": url.path == "/api/settings/billing/usage/live"
+                ? "text/event-stream"
+                : "application/json"]))
         return (Data(body.utf8), response)
     }
 
@@ -282,39 +324,36 @@ struct HuggingFaceUsageStatsTests {
     }
 
     private static func billingBody(
-        usage: String,
-        periodStart: String = "2026-08-01T00:00:00Z",
-        periodEnd: String = "2026-09-01T00:00:00Z") -> String
+        inference: String = Self.inferenceFixture,
+        jobs: String = Self.jobsFixture) -> String
     {
-        """
-        {"period":{"periodStart":"\(periodStart)","periodEnd":"\(periodEnd)"},"usage":\(usage)}
-        """
+        [
+            "event: usage\n",
+            "data: {\"inference\":\(inference),\"jobs\":\(jobs),",
+            "\"storage\":{},\"rateLimits\":{},\"zeroGpu\":{},",
+            "\"lastUpdatedAt\":\"2026-08-31T12:00:00Z\"}\n\n",
+        ].joined()
     }
 
     private static let profileFixture = #"{"name":"fixture-user","email":"fixture@example.com","isPro":true}"#
 
-    private static let billingFixture = #"""
-    {
-      "period": {"periodStart":"2026-08-01T00:00:00Z","periodEnd":"2026-09-01T00:00:00Z"},
-      "usage": {
-        "inference": [{
-          "entityId":"entity-inference",
-          "label":"fixture",
-          "product":"inference",
-          "quantity":1,
-          "startedAt":"2026-08-10T00:00:00Z",
-          "stoppedAt":"2026-08-10T00:01:00Z",
-          "freeGrant":false,
-          "productPrettyName":"Inference",
-          "unitLabel":"USD",
-          "totalCostMicroUSD":1250000,
-          "unitCostMicroUSD":1250000,
-          "active":false
-        }],
-        "spaces_serverless": [{"entityId":"entity-space","totalCostMicroUSD":500000}]
-      }
-    }
-    """#
+    private static let inferenceFixture = #"{"usedNanoUsd":1750000000,"#
+        + #""periodStart":"2026-08-01T00:00:00Z","#
+        + #""periodEnd":"2026-09-01T00:00:00Z"}"#
+
+    private static let jobsFixture = #"{"usedMicroUsd":660000,"#
+        + #""periodStart":"2026-08-15T00:00:00Z","#
+        + #""periodEnd":"2026-09-15T00:00:00Z"}"#
+
+    private static let inferenceFixtureWithProviderDetails = #"{"usedNanoUsd":1750000000,"numRequests":12,"#
+        + #""providerDetails":[{"provider":"fixture","numRequests":1,"#
+        + #""totalCostNanoUsd":900000000,"totalDurationMs":10}],"#
+        + #""periodStart":"2026-08-01T00:00:00Z","periodEnd":"2026-09-01T00:00:00Z","#
+        + #""includedNanoUsd":2000000000,"limitNanoUsd":0}"#
+
+    private static let billingFixture = Self.billingBody(
+        inference: Self.inferenceFixtureWithProviderDetails,
+        jobs: Self.jobsFixture)
 }
 
 @MainActor
