@@ -418,9 +418,12 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 - API token from `~/.codexbar/config.json` (`providers[].apiKey`), token accounts, or `HF_TOKEN`.
 - Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads finite JSON from
   `GET https://huggingface.co/api/settings/billing/usage`.
-- Shows exact personal billing-period spend in USD by summing validated `totalCostMicroUSD` line items within the
-  API's single reported period. Category totals appear separately in the usage breakdown, and the period end is
-  used as the reset date.
+- Shows the spend reported by the selected billing endpoint in USD by summing validated `totalCostMicroUSD` line
+  items within its single reported period. Category totals appear separately in the usage breakdown, and the period
+  end is used as the reset date. This is not a whole-account Hugging Face spending total.
+- The current public Hugging Face OpenAPI also exposes `/api/settings/billing/usage-v2`, which may contain additional
+  services such as Inference Providers. This integration intentionally does not combine that response with `/usage`:
+  Endpoints and Spaces overlap, while a unified aggregate and complete service semantics are not established.
 - Included credits are not converted into a quota or balance, and no synthetic daily cost history is emitted.
 - Storage, rate limits, and ZeroGPU fields are not interpreted as spend. Browser cookies, local Hugging Face token
   files, organization billing, and other billing scopes are not used. The finite billing response does not require
