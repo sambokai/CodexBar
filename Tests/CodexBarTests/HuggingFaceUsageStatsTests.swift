@@ -310,6 +310,46 @@ struct HuggingFaceUsageStatsTests {
         #expect(await strategy.isAvailable(context))
     }
 
+    @Test @MainActor
+    func `billing spend remains visible when cost summary is disabled`() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let snapshot = UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            providerCost: ProviderCostSnapshot(
+                used: 2.41,
+                limit: 0,
+                currencyCode: "USD",
+                period: "Current billing period",
+                resetsAt: Self.date("2026-09-01T00:00:00Z"),
+                updatedAt: now),
+            updatedAt: now)
+
+        let model = UsageMenuCardView.Model.make(.init(
+            provider: .huggingface,
+            metadata: HuggingFaceProviderDescriptor.descriptor.metadata,
+            snapshot: snapshot,
+            credits: nil,
+            creditsError: nil,
+            dashboard: nil,
+            dashboardError: nil,
+            tokenSnapshot: nil,
+            tokenError: nil,
+            account: AccountInfo(email: nil, plan: nil),
+            isRefreshing: false,
+            lastError: nil,
+            usageBarsShowUsed: true,
+            resetTimeDisplayStyle: .countdown,
+            tokenCostUsageEnabled: false,
+            costSummaryInlineEnabled: false,
+            showOptionalCreditsAndExtraUsage: true,
+            hidePersonalInfo: false,
+            now: now))
+
+        #expect(model.providerCost?.title == "API spend")
+        #expect(model.providerCost?.spendLine == "Current billing period: $2.41")
+    }
+
     private static func fetch(
         engine: ProviderPluginEngineKind,
         transport: ProviderHTTPTransportStub? = nil,
