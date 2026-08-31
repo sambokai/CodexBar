@@ -416,12 +416,15 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 
 ## Hugging Face
 - API token from `~/.codexbar/config.json` (`providers[].apiKey`), token accounts, or `HF_TOKEN`.
-- Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads personal-account billing usage from
-  `GET https://huggingface.co/api/users/{username}/billing/usage/live`.
-- Shows exact current billing-period spend in USD and a top-level usage-category breakdown. A parsed billing-period
-  end is used as the reset date.
+- Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads the first `usage` event from the
+  bearer-authenticated SSE endpoint `GET https://huggingface.co/api/settings/billing/usage/live`.
+- Shows exact inference billing-period spend in USD and jobs spend separately, because Hugging Face reports those
+  services with independent billing periods. The corresponding parsed period ends are used as reset dates/details.
+- The billing stream is bounded and closed after a complete `usage` event; an incomplete or malformed event is an
+  error rather than a partial snapshot.
 - Included credits are not converted into a quota or balance, and no synthetic daily cost history is emitted.
-- Browser cookies, local Hugging Face token files, organization billing, and other billing scopes are not used.
+- Storage, rate limits, and ZeroGPU fields are not interpreted as spend. Browser cookies, local Hugging Face token
+  files, organization billing, and other billing scopes are not used.
 - Status: none yet.
 
 ## Perplexity
