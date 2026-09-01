@@ -8,7 +8,7 @@ read_when:
 
 # Providers
 
-CodexBar currently registers 69 provider IDs. Some companies expose multiple surfaces, such as Codex vs OpenAI API or
+CodexBar currently registers 70 provider IDs. Some companies expose multiple surfaces, such as Codex vs OpenAI API or
 OpenCode vs OpenCode Go, because the auth source and quota shape differ.
 
 ## Fetch strategies (current)
@@ -85,6 +85,7 @@ complete when the available scan window covers fewer days.
 | Ollama | API key verifies Cloud API access (`api`); browser cookies expose Cloud quota windows (`web`). |
 | Synthetic | API key from config/env → quota API (`api`). |
 | OpenRouter | API token (config, overrides env) → credits API (`api`). |
+| Hugging Face | API token for reported spend (`api`) → optional billing-page prepaid Credits wallet via browser session cookies (`web`). |
 | Perplexity | Browser cookies/manual cookie/env session token → credits API (`web`). |
 | Xiaomi MiMo | Browser cookies → balance/token plan endpoints (`web`). |
 | Doubao | API key from config/env → Volcengine Ark chat-completions probe (`api`). |
@@ -409,6 +410,21 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 - Override base URL with `OPENROUTER_API_URL` env var.
 - Status: `https://status.openrouter.ai` (link only, no auto-polling yet).
 - Details: `docs/openrouter.md`.
+
+## Hugging Face
+- API spend uses the Hugging Face user access token from `~/.codexbar/config.json` (`providers[].apiKey`) or
+  `HF_TOKEN` and remains independent of the prepaid wallet.
+- Optional prepaid Credits enrichment requests `GET https://huggingface.co/settings/billing` with a normal
+  authenticated Hugging Face browser session cookie. Automatic import is limited to `huggingface.co`; Manual mode
+  accepts a full `Cookie:` header. The `.api` source never looks up cookies.
+- The current wallet is the server-rendered `div[data-props]` field `entity.currentBalanceUsd` for a personal user
+  entity. It is already USD; zero and fractional cents are valid. The legacy top-level `invoiceCreditsCents` value is
+  converted from safe integer cents only when the current field is absent.
+- Auto mode keeps bearer-token spend authoritative and fail-softs wallet enrichment. Web mode can return a balance-only
+  snapshot when bearer spend is unavailable. The Balance layout token uses the reported wallet and never derives it
+  from inference allowance, plan, or spend fields.
+- Status: none yet.
+- Details: `docs/huggingface.md`.
 
 ## Perplexity
 - Browser session cookie from automatic import, manual header/token, or `PERPLEXITY_SESSION_TOKEN` / `PERPLEXITY_COOKIE`.

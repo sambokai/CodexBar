@@ -529,7 +529,13 @@ enum MenuBarLayoutBalanceResolver {
         snapshot: UsageSnapshot?)
         -> String?
     {
-        // Provider-specific by design: only OpenRouter exposes its credit balance as the "Remaining" detail row.
+        if provider == .huggingface,
+           let cost = snapshot?.providerCost,
+           let balance = cost.balance
+        {
+            return UsageFormatter.currencyString(balance, currencyCode: cost.currencyCode)
+        }
+        // Provider-specific by design: OpenRouter exposes its credit balance as the "Remaining" detail row.
         guard provider == .openrouter else { return nil }
         return snapshot?.detailRow(label: "Remaining")?.value
     }
@@ -543,7 +549,10 @@ enum MenuBarLayoutBalanceResolver {
         snapshot: UsageSnapshot?)
         -> (remaining: Double?, used: Double?)
     {
-        // Provider-specific by design: only OpenRouter reports credit amounts in its "Credits" detail rows.
+        if provider == .huggingface {
+            return (snapshot?.providerCost?.balance, nil)
+        }
+        // Provider-specific by design: OpenRouter reports credit amounts in its "Credits" detail rows.
         guard provider == .openrouter else { return (nil, nil) }
         return (
             self.amount(snapshot?.detailRow(label: "Remaining")?.value),
