@@ -134,6 +134,7 @@ struct ProviderArchitectureGatekeeperTests {
             .bedrock: "Bedrock",
             .jetbrains: "JetBrains",
             .moonshot: "Moonshot",
+            .huggingface: "HF",
         ]
         for descriptor in ProviderDescriptorRegistry.all {
             let expected = overrides[descriptor.id] ?? descriptor.metadata.displayName
@@ -154,8 +155,8 @@ struct ProviderArchitectureGatekeeperTests {
             Self.hash(descriptor.branding.burnDownWidgetColor, into: &burnDownFingerprint)
         }
 
-        #expect(widgetFingerprint == 16_873_014_858_015_536_126)
-        #expect(burnDownFingerprint == 8_686_456_525_451_224_704)
+        #expect(widgetFingerprint == 4_790_247_700_021_160_837)
+        #expect(burnDownFingerprint == 997_760_875_428_652_324)
     }
 
     @Test
@@ -215,7 +216,7 @@ struct ProviderArchitectureGatekeeperTests {
         ])
         #expect(descriptors.compactMap { descriptor in
             descriptor.credentials?.apiKeyDebugLabel.map { (descriptor.id, $0) }
-        }.map(\.0) == [.openai, .azureopenai, .opencodego, .openrouter, .elevenlabs])
+        }.map(\.0) == [.openai, .azureopenai, .opencodego, .openrouter, .huggingface, .elevenlabs])
 
         #expect(CodexProviderDescriptor.descriptor.tokenCost.menuHintLines == [.localized("codex_api_estimate_hint")])
         #expect(ClaudeProviderDescriptor.descriptor.tokenCost.menuHintLines == [.estimate])
@@ -1541,19 +1542,19 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This logged-out-page classifier matches OpenAI's public landing-page brand token."),
         SuppressedProviderReference(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 412,
+            line: 429,
             anchor: ".appendingPathComponent(\".claude\", isDirectory: true)",
             expectedProviderIDs: ["claude"],
             reason: "The Claude transcript locator follows Claude Code's fixed default projects directory."),
         SuppressedProviderReference(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 486,
+            line: 503,
             anchor: ".appendingPathComponent(\".claude\", isDirectory: true)",
             expectedProviderIDs: ["claude"],
             reason: "The budgeted Claude transcript locator follows Claude Code's fixed default projects directory."),
         SuppressedProviderReference(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 593,
+            line: 610,
             anchor: "if value.contains(\"ide\") || value.contains(\"vscode\") || value.contains(\"cursor\") || value.contains(\"zed\") {",
             expectedProviderIDs: ["cursor", "zed"],
             reason: "This session-source classifier recognizes editor-origin strings emitted by upstream clients."),
@@ -1709,7 +1710,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact shared construct dispatches a provider-owned capability at the generic integration boundary."),
         AllowedProviderConstruct(
             path: "Sources/CodexBar/CostHistoryChartMenuView.swift",
-            line: 1116,
+            line: 1115,
             anchor: "let projects = provider == .codex ? snapshot.projects : []",
             expectedProviderIDs: ["codex"],
             expectedReferenceCount: 2,
@@ -2414,7 +2415,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact shared construct dispatches a provider-owned capability at the generic integration boundary."),
         AllowedProviderConstruct(
             path: "Sources/CodexBar/SpendDashboardModel.swift",
-            line: 1089,
+            line: 1093,
             anchor: "guard provider == .mistral || provider == .openrouter || provider == .xai else { return displayCalendar }",
             expectedProviderIDs: ["mistral", "openrouter", "xai"],
             expectedReferenceCount: 3,
@@ -3453,7 +3454,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact CLI construct preserves the provider-specific command and output contract."),
         AllowedProviderConstruct(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 198,
+            line: 215,
             anchor: "return AgentSession.Provider.claude.rawValue",
             expectedProviderIDs: ["claude"],
             expectedReferenceCount: 1,
@@ -3461,7 +3462,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact host integration normalizes the Claude Desktop wrapper to its agent provider name."),
         AllowedProviderConstruct(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 231,
+            line: 248,
             anchor: "if basename == AgentSession.Provider.codex.rawValue {",
             expectedProviderIDs: ["claude", "codex"],
             expectedReferenceCount: 5,
@@ -3469,7 +3470,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact host integration maps a provider-owned process, path, or window contract."),
         AllowedProviderConstruct(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 287,
+            line: 304,
             anchor: "guard self.provider(for: record) == .claude else { return .cli }",
             expectedProviderIDs: ["claude", "codex"],
             expectedReferenceCount: 2,
@@ -3477,7 +3478,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact host integration maps a provider-owned process, path, or window contract."),
         AllowedProviderConstruct(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 311,
+            line: 328,
             anchor: "guard record.executableBasename.lowercased() == AgentSession.Provider.codex.rawValue,",
             expectedProviderIDs: ["codex"],
             expectedReferenceCount: 1,
@@ -3485,7 +3486,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact host integration recognizes only the Codex app-server bundled in ChatGPT.app."),
         AllowedProviderConstruct(
             path: "Sources/CodexBarCore/AgentSession.swift",
-            line: 328,
+            line: 345,
             anchor: "URL(fileURLWithPath: $0).lastPathComponent == AgentSession.Provider.claude.rawValue",
             expectedProviderIDs: ["claude"],
             expectedReferenceCount: 1,
