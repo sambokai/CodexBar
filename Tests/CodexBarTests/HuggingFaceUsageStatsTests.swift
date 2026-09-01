@@ -62,19 +62,226 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
-    func `usage-v2-shaped quota data remains omitted from legacy spend`(
+    func `personal Free enrichment uses the validated period and preserves FP-136 output`(
         engine: ProviderPluginEngineKind) async throws
     {
-        for usageV2 in [Self.usageV2QuotaFixture, Self.usageV2MalformedQuotaFixture] {
+        let transport = Self.transport(
+            profileBody: Self.freeProfileFixture,
+            usageV2Body: Self.usageV2Fixture)
+        let snapshot = try await Self.fetch(engine: engine, transport: transport)
+        let requests = await transport.requests()
+
+        Self.expectLegacySpend(snapshot)
+        #expect(snapshot.detailRow(label: "Inference usage remaining")?.value == "$1.60")
+        #expect(snapshot.details.map(\.title) == ["Billing summary", "Usage breakdown"])
+        #expect(snapshot.details.first?.rows.map(\.label) == [
+            "Billing period",
+            "Reported spend",
+            "Inference usage remaining",
+        ])
+        #expect(requests.map { $0.url?.path } == [
+            "/api/whoami-v2",
+            "/api/settings/billing/usage",
+            "/api/settings/billing/usage-v2",
+        ])
+        let usageV2Request = try #require(requests.last)
+        #expect(usageV2Request.url?.query == "startDate=1785542400&endDate=1788220800")
+        for request in requests {
+            let url = try #require(request.url)
+            #expect(request.httpMethod == "GET")
+            #expect(request.httpBody == nil)
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer hf_fixture_token")
+            #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+            #expect(!url.absoluteString.contains("hf_fixture_token"))
+        }
+        #expect(snapshot.providerCost?.balance == nil)
+        #expect(snapshot.providerCost?.limit == 0)
+        #expect(snapshot.costUsage == nil)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `valid inference remainder preserves known zero and clamps overage`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let cases = [
+            ("positive", Self.usageV2Body(usedNanoUSD: "400000000", includedNanoUSD: "2000000000"), "$1.60"),
+            ("exhausted", Self.usageV2Body(usedNanoUSD: "2000000000", includedNanoUSD: "2000000000"), "$0.00"),
+            ("overage", Self.usageV2Body(usedNanoUSD: "3000000000", includedNanoUSD: "2000000000"), "$0.00"),
+            (
+                "equivalent instants",
+                Self.usageV2Body(
+                    periodStart: "2026-08-01T02:00:00+02:00",
+                    periodEnd: "2026-09-01T02:00:00+02:00"),
+                "$1.60"),
+        ]
+
+        for (name, usageV2Body, expectedValue) in cases {
             let snapshot = try await Self.fetch(
                 engine: engine,
-                billingBody: Self.billingBody(usageV2: usageV2))
+                profileBody: Self.freeProfileFixture,
+                usageV2Body: usageV2Body)
 
-            #expect(snapshot.providerCost?.used == 2.41)
-            #expect(snapshot.providerCost?.balance == nil)
-            #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
-            #expect(snapshot.details.map(\.title) == ["Billing summary", "Usage breakdown"])
+            Self.expectLegacySpend(snapshot)
+            #expect(snapshot.detailRow(label: "Inference usage remaining")?.value == expectedValue, "case: \(name)")
         }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `malformed inference remainder data omits only the optional row`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let cases: [(String, String)] = [
+            ("top-level array", #"[]"#),
+            ("missing usage", #"{}"#),
+            ("usage array", #"{"usage":[]}"#),
+            ("missing inference providers", #"{"usage":{}}"#),
+            ("inference providers array", #"{"usage":{"inferenceProviders":[]}}"#),
+            ("missing used", Self.usageV2Body(usedNanoUSD: nil)),
+            ("missing included", Self.usageV2Body(includedNanoUSD: nil)),
+            ("missing start", Self.usageV2Body(periodStart: nil)),
+            ("missing end", Self.usageV2Body(periodEnd: nil)),
+            ("null used", Self.usageV2Body(usedNanoUSD: "null")),
+            ("null included", Self.usageV2Body(includedNanoUSD: "null")),
+            ("string used", Self.usageV2Body(usedNanoUSD: #""400000000""#)),
+            ("string included", Self.usageV2Body(includedNanoUSD: #""2000000000""#)),
+            ("boolean used", Self.usageV2Body(usedNanoUSD: "true")),
+            ("boolean included", Self.usageV2Body(includedNanoUSD: "true")),
+            ("negative used", Self.usageV2Body(usedNanoUSD: "-1")),
+            ("negative included", Self.usageV2Body(includedNanoUSD: "-1")),
+            ("fractional used", Self.usageV2Body(usedNanoUSD: "400000000.5")),
+            ("fractional included", Self.usageV2Body(includedNanoUSD: "2000000000.5")),
+            ("unsafe used", Self.usageV2Body(usedNanoUSD: "9007199254740992")),
+            ("unsafe included", Self.usageV2Body(includedNanoUSD: "9007199254740992")),
+            ("invalid start", Self.usageV2Body(periodStart: "not-a-date")),
+            ("invalid end", Self.usageV2Body(periodEnd: "not-a-date")),
+            (
+                "reversed period",
+                Self.usageV2Body(periodStart: "2026-09-01T00:00:00Z", periodEnd: "2026-08-01T00:00:00Z")),
+            ("start mismatch", Self.usageV2Body(periodStart: "2026-08-02T00:00:00Z")),
+            ("end mismatch", Self.usageV2Body(periodEnd: "2026-09-02T00:00:00Z")),
+        ]
+
+        for (name, usageV2Body) in cases {
+            let snapshot = try await Self.fetch(
+                engine: engine,
+                profileBody: Self.freeProfileFixture,
+                usageV2Body: usageV2Body)
+
+            Self.expectLegacySpend(snapshot)
+            #expect(snapshot.detailRow(label: "Inference usage remaining") == nil, "case: \(name)")
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `optional inference endpoint failures preserve the FP-136 snapshot`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        for status in [401, 403, 404, 429, 500] {
+            let transport = Self.transport(
+                profileBody: Self.freeProfileFixture,
+                usageV2Body: Self.usageV2Fixture,
+                usageV2Status: status)
+            let snapshot = try await Self.fetch(engine: engine, transport: transport)
+            let requests = await transport.requests()
+
+            Self.expectLegacySpend(snapshot)
+            #expect(snapshot.detailRow(label: "Inference usage remaining") == nil, "status: \(status)")
+            #expect(requests.count == 3, "status: \(status)")
+        }
+
+        let transport = Self.transport(
+            profileBody: Self.freeProfileFixture,
+            usageV2Body: "not-json")
+        let snapshot = try await Self.fetch(
+            engine: engine,
+            transport: transport)
+        let requests = await transport.requests()
+        Self.expectLegacySpend(snapshot)
+        #expect(snapshot.detailRow(label: "Inference usage remaining") == nil)
+        #expect(requests.count == 3)
+
+        let throwingTransport = Self.transport(
+            profileBody: Self.freeProfileFixture,
+            usageV2Body: Self.usageV2Fixture,
+            usageV2Throws: true)
+        let throwingSnapshot = try await Self.fetch(engine: engine, transport: throwingTransport)
+        let throwingRequests = await throwingTransport.requests()
+        Self.expectLegacySpend(throwingSnapshot)
+        #expect(throwingSnapshot.detailRow(label: "Inference usage remaining") == nil)
+        #expect(throwingRequests.count == 3)
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `non-integral billing boundaries skip optional inference requests`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let periodStart = "2026-08-01T00:00:00.001Z"
+        let transport = Self.transport(
+            profileBody: Self.freeProfileFixture,
+            billingBody: Self.billingBody(periodStart: periodStart),
+            usageV2Body: Self.usageV2Body(periodStart: periodStart))
+        let snapshot = try await Self.fetch(engine: engine, transport: transport)
+        let requests = await transport.requests()
+
+        #expect(snapshot.providerCost?.used == 2.41)
+        #expect(snapshot.providerCost?.resetsAt == Self.date("2026-09-01T00:00:00Z"))
+        #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
+        #expect(snapshot.detailRow(label: "Inference usage remaining") == nil)
+        #expect(requests.map { $0.url?.path } == [
+            "/api/whoami-v2",
+            "/api/settings/billing/usage",
+        ])
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `only an exact personal Free profile requests optional inference usage`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let profiles = [
+            ("PRO", #"{"name":"fixture-user","email":"fixture@example.com","type":"user","isPro":true}"#, true),
+            ("missing plan", #"{"name":"fixture-user","email":"fixture@example.com","type":"user"}"#, false),
+            ("null plan", #"{"name":"fixture-user","email":"fixture@example.com","type":"user","isPro":null}"#, false),
+            ("missing type", #"{"name":"fixture-user","email":"fixture@example.com","isPro":false}"#, false),
+            (
+                "non-user type",
+                #"{"name":"fixture-user","email":"fixture@example.com","type":"org","isPro":false}"#,
+                false),
+        ]
+
+        for (name, profileBody, isPro) in profiles {
+            let transport = Self.transport(
+                profileBody: profileBody,
+                usageV2Body: Self.usageV2Fixture)
+            let snapshot = try await Self.fetch(engine: engine, transport: transport)
+            let requests = await transport.requests()
+
+            Self.expectLegacySpend(snapshot)
+            #expect(snapshot.detailRow(label: "Inference usage remaining") == nil, "case: \(name)")
+            #expect(requests.map { $0.url?.path } == [
+                "/api/whoami-v2",
+                "/api/settings/billing/usage",
+            ], "case: \(name)")
+            #expect(snapshot.detailRow(label: "Plan")?.value == (isPro ? "PRO" : nil), "case: \(name)")
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `organization membership does not disable personal Free inference usage`(
+        engine: ProviderPluginEngineKind) async throws
+    {
+        let profile = #"{"name":"fixture-user","email":"fixture@example.com","type":"user","isPro":false,"orgs":[{"name":"fixture-org"}]}"#
+        let transport = Self.transport(profileBody: profile, usageV2Body: Self.usageV2Fixture)
+        let snapshot = try await Self.fetch(engine: engine, transport: transport)
+        let requests = await transport.requests()
+
+        Self.expectLegacySpend(snapshot)
+        #expect(snapshot.detailRow(label: "Inference usage remaining")?.value == "$1.60")
+        #expect(requests.map { $0.url?.path } == [
+            "/api/whoami-v2",
+            "/api/settings/billing/usage",
+            "/api/settings/billing/usage-v2",
+        ])
+        #expect(requests.allSatisfy { $0.url?.path != "/api/organizations/fixture-org/billing/usage-v2" })
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
@@ -387,19 +594,48 @@ struct HuggingFaceUsageStatsTests {
         #expect(model.providerCost?.spendLine == "Reported billing period: $2.41")
     }
 
+    private static func expectLegacySpend(_ snapshot: UsageSnapshot) {
+        #expect(snapshot.primary == nil)
+        #expect(snapshot.secondary == nil)
+        #expect(snapshot.tertiary == nil)
+        #expect(snapshot.extraRateWindows == nil)
+        #expect(snapshot.costUsage == nil)
+        #expect(snapshot.providerCost?.used == 2.41)
+        #expect(snapshot.providerCost?.currencyCode == "USD")
+        #expect(snapshot.providerCost?.period == "Reported billing period")
+        #expect(snapshot.providerCost?.resetsAt == self.date("2026-09-01T00:00:00Z"))
+        #expect(snapshot.providerCost?.limit == 0)
+        #expect(snapshot.providerCost?.balance == nil)
+        #expect(snapshot.providerCost?.nextRegenAmount == nil)
+        #expect(snapshot.dataConfidence == .exact)
+        #expect(snapshot.identity?.providerID == .huggingface)
+        #expect(snapshot.identity?.accountEmail == "fixture@example.com")
+        #expect(snapshot.identity?.accountID == "fixture-user")
+        #expect(snapshot.detailRow(label: "Billing period")?.value == "2026-08-01 – 2026-09-01")
+        #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
+        #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
+        #expect(snapshot.details.last?.rows.map(\.value) == ["$1.75", "$0.66"])
+    }
+
     private static func fetch(
         engine: ProviderPluginEngineKind,
         transport: ProviderHTTPTransportStub? = nil,
         profileBody: String = Self.profileFixture,
         billingBody: String = Self.billingFixture,
         profileStatus: Int = 200,
-        billingStatus: Int = 200) async throws -> UsageSnapshot
+        billingStatus: Int = 200,
+        usageV2Body: String? = nil,
+        usageV2Status: Int = 200,
+        usageV2Throws: Bool = false) async throws -> UsageSnapshot
     {
         let transport = transport ?? Self.transport(
             profileBody: profileBody,
             billingBody: billingBody,
             profileStatus: profileStatus,
-            billingStatus: billingStatus)
+            billingStatus: billingStatus,
+            usageV2Body: usageV2Body,
+            usageV2Status: usageV2Status,
+            usageV2Throws: usageV2Throws)
         let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
         return try await runtime.fetchUsage(
             secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
@@ -410,7 +646,10 @@ struct HuggingFaceUsageStatsTests {
         profileBody: String = Self.profileFixture,
         billingBody: String = Self.billingFixture,
         profileStatus: Int = 200,
-        billingStatus: Int = 200) -> ProviderHTTPTransportStub
+        billingStatus: Int = 200,
+        usageV2Body: String? = nil,
+        usageV2Status: Int = 200,
+        usageV2Throws: Bool = false) -> ProviderHTTPTransportStub
     {
         ProviderHTTPTransportStub { request in
             let url = try #require(request.url)
@@ -419,6 +658,11 @@ struct HuggingFaceUsageStatsTests {
                 return try Self.response(url: url, body: profileBody, statusCode: profileStatus)
             case "/api/settings/billing/usage":
                 return try Self.response(url: url, body: billingBody, statusCode: billingStatus)
+            case "/api/settings/billing/usage-v2":
+                if usageV2Throws {
+                    throw ProviderPluginError.script("synthetic optional transport failure")
+                }
+                return try Self.response(url: url, body: usageV2Body ?? "{}", statusCode: usageV2Status)
             default:
                 throw ProviderPluginError.script("Unexpected Hugging Face fixture path: \(url.path)")
             }
@@ -456,12 +700,24 @@ struct HuggingFaceUsageStatsTests {
     private static func billingBody(
         periodStart: String = "2026-08-01T00:00:00Z",
         periodEnd: String = "2026-09-01T00:00:00Z",
-        usage: String = Self.billingUsageFixture,
-        usageV2: String? = nil) -> String
+        usage: String = Self.billingUsageFixture) -> String
     {
-        let usageV2Field = usageV2.map { ",\"usageV2\":\($0)" } ?? ""
-        return "{\"period\":{\"periodStart\":\"\(periodStart)\",\"periodEnd\":\"\(periodEnd)\"}," +
-            "\"usage\":\(usage)\(usageV2Field)}"
+        "{\"period\":{\"periodStart\":\"\(periodStart)\",\"periodEnd\":\"\(periodEnd)\"}," +
+            "\"usage\":\(usage)}"
+    }
+
+    private static func usageV2Body(
+        usedNanoUSD: String? = "400000000",
+        includedNanoUSD: String? = "2000000000",
+        periodStart: String? = "2026-08-01T00:00:00Z",
+        periodEnd: String? = "2026-09-01T00:00:00Z") -> String
+    {
+        let used = usedNanoUSD.map { "\"usedNanoUsd\":\($0)" } ?? ""
+        let included = includedNanoUSD.map { "\"includedNanoUsd\":\($0)" } ?? ""
+        let start = periodStart.map { "\"periodStart\":\"\($0)\"" } ?? ""
+        let end = periodEnd.map { "\"periodEnd\":\"\($0)\"" } ?? ""
+        let fields = [used, included, start, end].filter { !$0.isEmpty }.joined(separator: ",")
+        return "{\"usage\":{\"inferenceProviders\":{\(fields)}}}"
     }
 
     private static func usageBody(endpoints: String, spaces: String) -> String {
@@ -469,6 +725,7 @@ struct HuggingFaceUsageStatsTests {
     }
 
     private static let profileFixture = #"{"name":"fixture-user","email":"fixture@example.com","isPro":true}"#
+    private static let freeProfileFixture = #"{"name":"fixture-user","email":"fixture@example.com","type":"user","isPro":false}"#
 
     private static let billingUsageFixture = #"""
     {"Endpoints":[
@@ -488,18 +745,7 @@ struct HuggingFaceUsageStatsTests {
     """#
 
     private static let billingFixture = Self.billingBody()
-
-    private static let usageV2QuotaFixture = #"""
-    {"usage":{"inferenceProviders":{"usedNanoUsd":400000000,"includedNanoUsd":2000000000,
-      "limitNanoUsd":5000000000,"numRequests":4,"periodStart":"2026-08-01T00:00:00Z",
-      "periodEnd":"2026-09-01T00:00:00Z"}},"jobs":{"usedMicroUsd":250000,"totalMinutes":3.5}}
-    """#
-
-    private static let usageV2MalformedQuotaFixture = #"""
-    {"usage":{"inferenceProviders":{"usedNanoUsd":400000000,"includedNanoUsd":"2000000000",
-      "limitNanoUsd":5000000000,"numRequests":4,"periodStart":"2026-08-01T00:00:00Z",
-      "periodEnd":"2026-09-01T00:00:00Z"}},"jobs":{"usedMicroUsd":250000,"totalMinutes":3.5}}
-    """#
+    private static let usageV2Fixture = Self.usageV2Body()
 }
 
 @MainActor

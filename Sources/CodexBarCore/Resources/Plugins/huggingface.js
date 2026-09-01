@@ -68,6 +68,16 @@ defineProvider({
       }
     }
 
+    async function getOptionalJSON(url) {
+      try {
+        const response = await ctx.http.get(url);
+        if (typeof response.status !== "number" || response.status < 200 || response.status >= 300) return null;
+        return JSON.parse(response.bodyText);
+      } catch {
+        return null;
+      }
+    }
+
     function parsePeriod(period) {
       const value = object(period, "billing.period");
       const periodStartText = requiredString(value.periodStart, "billing.period.periodStart");
@@ -120,6 +130,73 @@ defineProvider({
       return 0;
     }
 
+    function unixSeconds(date) {
+      const milliseconds = date.getTime();
+      if (!Number.isFinite(milliseconds) || milliseconds % 1000 !== 0) return null;
+      const seconds = milliseconds / 1000;
+      return Number.isSafeInteger(seconds) ? seconds : null;
+    }
+
+    function safeNanoUSD(value) {
+      if (
+        typeof value !== "number" ||
+        !Number.isFinite(value) ||
+        !Number.isInteger(value) ||
+        value < 0 ||
+        !Number.isSafeInteger(value)
+      ) {
+        return null;
+      }
+      return value;
+    }
+
+    function parseInferenceUsageRemaining(response, period) {
+      if (!response || typeof response !== "object" || Array.isArray(response)) return null;
+      const usage = response.usage;
+      if (!usage || typeof usage !== "object" || Array.isArray(usage)) return null;
+      const inferenceProviders = usage.inferenceProviders;
+      if (!inferenceProviders || typeof inferenceProviders !== "object" || Array.isArray(inferenceProviders)) {
+        return null;
+      }
+
+      const usedNanoUSD = safeNanoUSD(inferenceProviders.usedNanoUsd);
+      const includedNanoUSD = safeNanoUSD(inferenceProviders.includedNanoUsd);
+      if (usedNanoUSD === null || includedNanoUSD === null) return null;
+
+      if (
+        typeof inferenceProviders.periodStart !== "string" ||
+        !inferenceProviders.periodStart.trim() ||
+        typeof inferenceProviders.periodEnd !== "string" ||
+        !inferenceProviders.periodEnd.trim()
+      ) {
+        return null;
+      }
+
+      let inferencePeriodStart;
+      let inferencePeriodEnd;
+      try {
+        inferencePeriodStart = ctx.date.iso(inferenceProviders.periodStart.trim());
+        inferencePeriodEnd = ctx.date.iso(inferenceProviders.periodEnd.trim());
+      } catch {
+        return null;
+      }
+
+      const inferenceStartMilliseconds = inferencePeriodStart.getTime();
+      const inferenceEndMilliseconds = inferencePeriodEnd.getTime();
+      if (
+        !Number.isFinite(inferenceStartMilliseconds) ||
+        !Number.isFinite(inferenceEndMilliseconds) ||
+        inferenceEndMilliseconds < inferenceStartMilliseconds ||
+        inferenceStartMilliseconds !== period.periodStart.getTime() ||
+        inferenceEndMilliseconds !== period.periodEnd.getTime()
+      ) {
+        return null;
+      }
+
+      const remainingNanoUSD = Math.max(0, includedNanoUSD - usedNanoUSD);
+      return remainingNanoUSD / 1_000_000_000;
+    }
+
     const profile = object(await getJSON(`${root}/api/whoami-v2`, "identity"), "identity response");
     const username = requiredString(profile.name, "identity.name");
     const email = optionalString(profile.email, "identity.email");
@@ -163,6 +240,18 @@ defineProvider({
 
     const periodStartLabel = period.periodStart.toISOString().slice(0, 10);
     const periodEndLabel = period.periodEnd.toISOString().slice(0, 10);
+    const isPersonalFree = profile.type === "user" && profile.isPro === false;
+    let inferenceUsageRemaining = null;
+    if (isPersonalFree) {
+      const startDate = unixSeconds(period.periodStart);
+      const endDate = unixSeconds(period.periodEnd);
+      if (startDate !== null && endDate !== null) {
+        const usageV2 = await getOptionalJSON(
+          `${root}/api/settings/billing/usage-v2?startDate=${startDate}&endDate=${endDate}`,
+        );
+        inferenceUsageRemaining = parseInferenceUsageRemaining(usageV2, period);
+      }
+    }
     const identity = {
       email: email || undefined,
       accountID: username,
@@ -184,6 +273,9 @@ defineProvider({
           rows: [
             { label: "Billing period", value: `${periodStartLabel} – ${periodEndLabel}` },
             { label: "Reported spend", value: ctx.format.usd(totalUSD) },
+            ...(inferenceUsageRemaining !== null
+              ? [{ label: "Inference usage remaining", value: ctx.format.usd(inferenceUsageRemaining) }]
+              : []),
             ...(isPro ? [{ label: "Plan", value: "PRO" }] : []),
           ],
         },

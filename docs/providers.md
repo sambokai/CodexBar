@@ -416,20 +416,22 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 
 ## Hugging Face
 - API token from `~/.codexbar/config.json` (`providers[].apiKey`), token accounts, or `HF_TOKEN`.
-- Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads finite JSON from
-  `GET https://huggingface.co/api/settings/billing/usage`.
+- API-token authentication uses `GET https://huggingface.co/api/whoami-v2` and
+  `GET https://huggingface.co/api/settings/billing/usage`; the latter remains the source of reported spend and
+  category breakdown.
 - Shows the spend reported by the selected billing endpoint in USD by summing validated `totalCostMicroUSD` line
   items within its single reported period. Category totals appear separately in the usage breakdown, and the period
   end is used as the reset date. This is not a whole-account Hugging Face spending total.
-- Hugging Face documents monthly compute credits for paid plans as shared across Inference Providers, Inference
-  Endpoints, upgraded Spaces hardware, and Jobs. Those credits are applied before pay-as-you-go usage, so a plan
-  entitlement cannot be subtracted from this provider's selected `/usage` spend total.
-- Hugging Face-owned code currently references `/api/settings/billing/usage-v2` and reads
-  `usage.inferenceProviders` fields such as `usedNanoUsd`, `includedNanoUsd`, and `limitNanoUsd`. That is useful
-  implementation evidence, but it does not establish a public same-scope contract for the legacy `/usage` total.
-  CodexBar therefore does not request or combine `usage-v2` and intentionally omits a remaining allowance/limit row.
-  Omission means the remainder is unsupported or ambiguous, not `$0.00`; no plan amount or synthetic quota is inferred,
-  and no synthetic daily cost history is emitted.
+- Verified personal Free accounts may additionally use
+  `GET https://huggingface.co/api/settings/billing/usage-v2` for an `Inference usage remaining` detail row. The
+  request uses the validated `/usage` period as exact Unix-second `startDate` and `endDate` boundaries.
+- The optional remainder is derived from the same validated `usage.inferenceProviders` object and period as
+  `max(0, includedNanoUsd - usedNanoUsd)`, using safe integer nano-USD arithmetic before converting to USD.
+  Missing, malformed, unsafe, or incompatible data and any optional-request failure omit the row without affecting
+  the FP-136 spend result.
+- PRO and unknown personal-plan states do not show the remainder. Organization billing is not implemented; mere
+  membership in an organization does not change the personal Free-account gate.
+- This inference-usage remainder is distinct from Hugging Face's prepaid `Credits` wallet, which is owned by FP-154.
 - Storage, rate limits, and ZeroGPU fields are not interpreted as spend. Browser cookies, local Hugging Face token
   files, organization billing, and other billing scopes are not used. The finite billing response does not require
   browser session state.
