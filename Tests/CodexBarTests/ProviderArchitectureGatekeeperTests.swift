@@ -2265,7 +2265,7 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "This exact app-runtime bridge coordinates provider-owned state through the shared controller."),
         AllowedProviderConstruct(
             path: "Sources/CodexBar/Providers/Shared/ProviderTokenAccountSelection.swift",
-            line: 28,
+            line: 29,
             anchor: "guard provider == .deepseek else { return settings.showOptionalCreditsAndExtraUsage }",
             expectedProviderIDs: ["deepseek"],
             expectedReferenceCount: 1,
