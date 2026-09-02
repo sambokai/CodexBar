@@ -18,6 +18,9 @@ public enum HuggingFaceProviderDescriptor {
     static func makeDescriptor() -> ProviderDescriptor {
         ProviderDescriptor(
             id: .huggingface,
+            settingsSection: .init(
+                HuggingFaceProviderSettingsKey.self,
+                cookieSettings: HuggingFaceProviderSettings.self),
             credentials: self.credentials,
             metadata: ProviderMetadata(
                 id: .huggingface,
@@ -54,7 +57,24 @@ public enum HuggingFaceProviderDescriptor {
                         "this integration does not provide daily request history."
                 }),
             presentation: ProviderUsagePresentation(
-                costPresenter: { _ in ProviderCostPresentation(menuCardStyle: .apiSpend) },
+                costPresenter: { snapshot in
+                    guard let cost = snapshot.providerCost else { return ProviderCostPresentation() }
+                    let balances = cost.balance.map {
+                        [ProviderCostPresentation.Balance(
+                            label: "Credits",
+                            amount: $0,
+                            currencyCode: cost.currencyCode)]
+                    } ?? []
+                    if cost.period == "Prepaid credits" {
+                        return ProviderCostPresentation(
+                            showsGenericFallback: false,
+                            balances: balances,
+                            menuCardStyle: .prepaidCredits)
+                    }
+                    return ProviderCostPresentation(
+                        balances: balances,
+                        menuCardStyle: cost.balance == nil ? .apiSpend : .payAsYouGoSpend)
+                },
                 menuCard: ProviderMenuCardPresentation(providerCostIsRequiredUsage: true),
                 optionalDetails: ProviderOptionalDetailsPresentation(
                     costSummaryTitles: ["Billing summary"])),
@@ -67,18 +87,32 @@ public enum HuggingFaceProviderDescriptor {
 
     private static func fetchPlan() -> ProviderFetchPlan {
         ProviderFetchPlan(
-            sourceModes: [.auto, .api],
-            pipeline: ProviderFetchPipeline(resolveStrategies: { _ in
-                [ScriptFetchStrategy(
-                    id: "huggingface.js",
-                    provider: .huggingface,
-                    bundledPlugin: "huggingface",
-                    secretKey: HuggingFaceSettingsReader.tokenEnvironmentKey,
-                    sourceLabel: "api",
-                    resolveSecret: { environment in
-                        self.credentials.resolveToken(environment: environment)?.token
-                    },
-                    isEnabled: { _ in true })]
+            sourceModes: [.auto, .api, .web],
+            pipeline: ProviderFetchPipeline(resolveStrategies: { context in
+                let api = self.apiStrategy()
+                switch context.sourceMode {
+                case .api, .cli, .oauth:
+                    return [api]
+                case .web:
+                    return [HuggingFaceWebFetchStrategy()]
+                case .auto:
+                    return [HuggingFaceAutoFetchStrategy(
+                        apiStrategy: api,
+                        webStrategy: HuggingFaceWebFetchStrategy())]
+                }
             }))
+    }
+
+    private static func apiStrategy() -> ScriptFetchStrategy {
+        ScriptFetchStrategy(
+            id: "huggingface.js",
+            provider: .huggingface,
+            bundledPlugin: "huggingface",
+            secretKey: HuggingFaceSettingsReader.tokenEnvironmentKey,
+            sourceLabel: "api",
+            resolveSecret: { environment in
+                self.credentials.resolveToken(environment: environment)?.token
+            },
+            isEnabled: { _ in true })
     }
 }
