@@ -26,6 +26,34 @@ struct ProviderSettingsDescriptorTests {
     }
 
     @Test
+    func `cookie source refresh enables bounded browser retry without leaking permission`() async throws {
+        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-cookie-explicit-retry")
+        fixture.settings.huggingFaceCookieSource = .auto
+        let context = fixture.settingsContext(provider: .huggingface)
+        let picker = try #require(HuggingFaceProviderImplementation().settingsPickers(context: context).first)
+        let action = try #require(picker.trailingActions.first)
+        var browserRetryAllowed = false
+        var otherBrowserRetryAllowed = true
+        fixture.store._test_providerRefreshOverride = { _ in
+            browserRetryAllowed = BrowserCookieAccessGate.shouldAttempt(.chrome)
+            otherBrowserRetryAllowed = BrowserCookieAccessGate.shouldAttempt(.edge)
+        }
+        defer { fixture.store._test_providerRefreshOverride = nil }
+
+        await KeychainAccessGate.withTaskOverrideForTesting(false) {
+            await BrowserCookieAccessGate.withDeniedBrowsersForTesting([.chrome, .edge]) {
+                await action.perform()
+
+                #expect(browserRetryAllowed)
+                #expect(!otherBrowserRetryAllowed)
+                ProviderInteractionContext.$current.withValue(.userInitiated) {
+                    #expect(!BrowserCookieAccessGate.shouldAttempt(.chrome))
+                }
+            }
+        }
+    }
+
+    @Test
     func `toggle I ds are unique across providers`() throws {
         let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-unique")
         var seenToggleIDs: Set<String> = []
@@ -168,6 +196,97 @@ struct ProviderSettingsDescriptorTests {
                 #expect(observedInteraction == .userInitiated)
                 #expect(CookieHeaderCache.load(provider: .opencode)?.cookieHeader == "new-test-cookie")
                 #expect(picker.trailingText?()?.contains("Test new") == true)
+            }
+        }
+    }
+
+    @Test
+    func `hugging face cookie refresh forces optional enrichment and accepts API primary result`() async throws {
+        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-huggingface-refresh")
+        fixture.settings.huggingFaceCookieSource = .auto
+        fixture.settings.showOptionalCreditsAndExtraUsage = false
+        let context = fixture.settingsContext(provider: .huggingface)
+        let picker = try #require(HuggingFaceProviderImplementation().settingsPickers(context: context).first)
+        let action = try #require(picker.trailingActions.first)
+        let service = "com.steipete.codexbar.tests.settings-cookie-refresh.\(UUID().uuidString)"
+        var observedIncludeOptionalUsage = false
+
+        await KeychainCacheStore.withServiceOverrideForTesting(service) {
+            await KeychainCacheStore.withImplicitTestStoreForTesting {
+                fixture.store._test_providerRefreshOverride = { provider in
+                    observedIncludeOptionalUsage = fixture.store.makeFetchContext(
+                        provider: provider,
+                        override: nil).includeOptionalUsage
+                    CookieHeaderCache.store(
+                        provider: provider,
+                        cookieHeader: "new-test-cookie",
+                        sourceLabel: "Test new")
+                    let now = Date()
+                    fixture.store.snapshots[provider.instanceID] = UsageSnapshot(
+                        primary: nil,
+                        secondary: nil,
+                        providerCost: ProviderCostSnapshot(
+                            used: 2.41,
+                            limit: 0,
+                            currencyCode: "USD",
+                            period: "Reported billing period",
+                            balance: 9.25,
+                            updatedAt: now),
+                        updatedAt: now)
+                    fixture.store.lastSourceLabels[provider.instanceID] = "api"
+                }
+                defer { fixture.store._test_providerRefreshOverride = nil }
+
+                await action.perform()
+
+                #expect(observedIncludeOptionalUsage)
+                #expect(fixture.settings.showOptionalCreditsAndExtraUsage == false)
+                #expect(CookieHeaderCache.load(provider: .huggingface)?.cookieHeader == "new-test-cookie")
+                #expect(picker.trailingText?()?.contains("Test new") == true)
+            }
+        }
+    }
+
+    @Test
+    func `hugging face cookie refresh rejects API result without imported balance`() async throws {
+        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-huggingface-refresh-failure")
+        fixture.settings.huggingFaceCookieSource = .auto
+        fixture.settings.showOptionalCreditsAndExtraUsage = false
+        let context = fixture.settingsContext(provider: .huggingface)
+        let picker = try #require(HuggingFaceProviderImplementation().settingsPickers(context: context).first)
+        let action = try #require(picker.trailingActions.first)
+        let service = "com.steipete.codexbar.tests.settings-cookie-refresh.\(UUID().uuidString)"
+
+        await KeychainCacheStore.withServiceOverrideForTesting(service) {
+            await KeychainCacheStore.withImplicitTestStoreForTesting {
+                CookieHeaderCache.store(
+                    provider: .huggingface,
+                    cookieHeader: "old-test-cookie",
+                    sourceLabel: "Test old")
+                fixture.store._test_providerRefreshOverride = { provider in
+                    CookieHeaderCache.store(
+                        provider: provider,
+                        cookieHeader: "invalid-test-cookie",
+                        sourceLabel: "Test invalid")
+                    let now = Date()
+                    fixture.store.snapshots[provider.instanceID] = UsageSnapshot(
+                        primary: nil,
+                        secondary: nil,
+                        providerCost: ProviderCostSnapshot(
+                            used: 2.41,
+                            limit: 0,
+                            currencyCode: "USD",
+                            period: "Reported billing period",
+                            updatedAt: now),
+                        updatedAt: now)
+                    fixture.store.lastSourceLabels[provider.instanceID] = "api"
+                }
+                defer { fixture.store._test_providerRefreshOverride = nil }
+
+                await action.perform()
+
+                #expect(CookieHeaderCache.load(provider: .huggingface)?.cookieHeader == "old-test-cookie")
+                #expect(picker.trailingText?() == "Failed")
             }
         }
     }
