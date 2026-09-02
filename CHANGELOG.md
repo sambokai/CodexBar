@@ -2,6 +2,9 @@
 
 ## 0.56.2 — 2026-08-31
 
+### Added
+- Hugging Face: show the prepaid Credits wallet from an authenticated billing-page session, keeping bearer-token spend separate and merging only when both sources identify the same account.
+
 ### Performance
 - Local costs: reduce background CPU spent parsing native session timestamps and validating appended Codex history, preserving timestamp precision, daily totals, and fork accounting.
 - Codex: reduce repeated decoding of cached cost history during scans, while preserving stored totals and checking for database and filesystem changes.

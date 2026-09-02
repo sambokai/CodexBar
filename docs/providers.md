@@ -88,7 +88,7 @@ complete when the available scan window covers fewer days.
 | Ollama | API key verifies Cloud API access (`api`); browser cookies expose Cloud quota windows (`web`). |
 | Synthetic | API key from config/env → quota API (`api`). |
 | OpenRouter | API token (config, overrides env) → credits API (`api`). |
-| Hugging Face | API token from config/env or token accounts → finite personal billing usage API (`api`). |
+| Hugging Face | API token for personal billing spend (`api`), optionally enriched by the prepaid Credits wallet from browser-session billing data (`web`). |
 | Perplexity | Browser cookies/manual cookie/env session token → credits API (`web`). |
 | Xiaomi MiMo | Browser cookies → balance/token plan endpoints (`web`). |
 | Doubao | API key from config/env → Volcengine Ark chat-completions probe (`api`). |
@@ -415,20 +415,20 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 - Details: `docs/openrouter.md`.
 
 ## Hugging Face
-- API token from `~/.codexbar/config.json` (`providers[].apiKey`), token accounts, or `HF_TOKEN`.
-- Authenticates with `GET https://huggingface.co/api/whoami-v2` and reads finite JSON from
-  `GET https://huggingface.co/api/settings/billing/usage`.
-- Shows the spend reported by the selected billing endpoint in USD by summing validated `totalCostMicroUSD` line
-  items within its single reported period. Category totals appear separately in the usage breakdown, and the period
-  end is used as the reset date. This is not a whole-account Hugging Face spending total.
-- The current public Hugging Face OpenAPI also exposes `/api/settings/billing/usage-v2`, which may contain additional
-  services such as Inference Providers. This integration intentionally does not combine that response with `/usage`:
-  Endpoints and Spaces overlap, while a unified aggregate and complete service semantics are not established.
-- Included credits are not converted into a quota or balance, and no synthetic daily cost history is emitted.
-- Storage, rate limits, and ZeroGPU fields are not interpreted as spend. Browser cookies, local Hugging Face token
-  files, organization billing, and other billing scopes are not used. The finite billing response does not require
-  browser session state.
+- API spend uses the Hugging Face user access token from `~/.codexbar/config.json` (`providers[].apiKey`) or
+  `HF_TOKEN` and remains independent of the prepaid wallet.
+- Optional prepaid Credits enrichment requests `GET https://huggingface.co/settings/billing` with a normal
+  authenticated Hugging Face browser session cookie. Automatic import is limited to `huggingface.co`; Manual mode
+  accepts a full `Cookie:` header. The `.api` source never looks up cookies.
+- The current wallet is the server-rendered `div[data-props]` field `entity.currentBalanceUsd` for a personal user
+  entity. It is already USD; zero and fractional cents are valid. The legacy top-level `invoiceCreditsCents` value is
+  converted from safe integer cents only when the current field is absent.
+- Auto mode keeps bearer-token spend authoritative and fail-softs wallet enrichment. It attaches the wallet only when
+  the billing-page entity name matches the bearer `whoami-v2` account; an unknown or different account leaves spend
+  unchanged. Web mode can still return a balance-only snapshot without combining independently authenticated data.
+- The Balance layout token uses the reported wallet and never derives it from inference allowance, plan, or spend.
 - Status: none yet.
+- Details: `docs/huggingface.md`.
 
 ## Perplexity
 - Browser session cookie from automatic import, manual header/token, or `PERPLEXITY_SESSION_TOKEN` / `PERPLEXITY_COOKIE`.
