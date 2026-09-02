@@ -303,7 +303,7 @@ struct HuggingFaceUsageStatsTests {
         #expect(descriptor.metadata.supportsCredits == false)
         #expect(descriptor.metadata.creditsHint == "Spend reported by Hugging Face billing")
         #expect(descriptor.tokenCost.supportsTokenCost == false)
-        #expect(descriptor.fetchPlan.sourceModes == [.auto, .api])
+        #expect(descriptor.fetchPlan.sourceModes == [.auto, .api, .web])
         #expect(descriptor.cli.name == "huggingface")
         #expect(descriptor.cli.aliases == ["hf"])
         #expect(descriptor.metadata.dashboardURL == "https://huggingface.co/settings/billing")
@@ -329,46 +329,377 @@ struct HuggingFaceUsageStatsTests {
         #expect(strategies.map(\.id) == ["huggingface.js"])
         #expect(strategy.kind == .apiToken)
         #expect(await strategy.isAvailable(context))
+
+        let webContext = Self.fetchContext(
+            sourceMode: .web,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings())
+        let webStrategies = await descriptor.fetchPlan.pipeline.resolveStrategies(webContext)
+        #expect(webStrategies.map(\.id) == ["huggingface.web"])
+        #expect(webStrategies.first?.kind == .web)
+
+        let autoContext = Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings())
+        let autoStrategies = await descriptor.fetchPlan.pipeline.resolveStrategies(autoContext)
+        #expect(autoStrategies.map(\.id) == ["huggingface.js"])
+        #expect(autoStrategies.first?.kind == .apiToken)
     }
 
-    @Test @MainActor
-    func `billing spend remains visible when cost summary is disabled`() {
-        let now = Date(timeIntervalSince1970: 1_800_000_000)
-        let snapshot = UsageSnapshot(
-            primary: nil,
-            secondary: nil,
-            providerCost: ProviderCostSnapshot(
-                used: 2.41,
-                limit: 0,
-                currencyCode: "USD",
-                period: "Reported billing period",
-                resetsAt: Self.date("2026-09-01T00:00:00Z"),
-                updatedAt: now),
-            updatedAt: now)
+    @Test
+    func `current server rendered wallet uses USD without asserting account ownership`() throws {
+        let current = Self.dataProps(
+            #"{"entity":{"type":"user","name":"unverified-name","user":"fixture-user","currentBalanceUsd":12.345}}"#)
+        let snapshot = try HuggingFaceWebCreditsParser.parseSnapshot(current)
+        #expect(snapshot.balanceUSD == 12.345)
 
-        let model = UsageMenuCardView.Model.make(.init(
-            provider: .huggingface,
-            metadata: HuggingFaceProviderDescriptor.descriptor.metadata,
-            snapshot: snapshot,
-            credits: nil,
-            creditsError: nil,
-            dashboard: nil,
-            dashboardError: nil,
-            tokenSnapshot: nil,
-            tokenError: nil,
-            account: AccountInfo(email: nil, plan: nil),
-            isRefreshing: false,
-            lastError: nil,
-            usageBarsShowUsed: true,
-            resetTimeDisplayStyle: .countdown,
-            tokenCostUsageEnabled: false,
-            costSummaryInlineEnabled: false,
-            showOptionalCreditsAndExtraUsage: true,
-            hidePersonalInfo: false,
-            now: now))
+        let zero = Self.dataProps(
+            #"{"entity":{"type":"user","name":"unverified-name","user":"fixture-user","currentBalanceUsd":0}}"#)
+        #expect(try HuggingFaceWebCreditsParser.parse(zero) == 0)
+        #expect(Self.parserError("<div>Credits remaining: $12.34</div>") == .unavailable)
+    }
 
-        #expect(model.providerCost?.title == "API spend")
-        #expect(model.providerCost?.spendLine == "Reported billing period: $2.41")
+    @Test
+    func `legacy invoice credits convert once`() throws {
+        let legacy = Self.dataProps(#"{"invoiceCreditsCents":7250}"#)
+        let snapshot = try HuggingFaceWebCreditsParser.parseSnapshot(legacy)
+        #expect(snapshot.balanceUSD == 72.5)
+
+        let both = Self.dataProps(
+            #"{"invoiceCreditsCents":7250,"entity":{"type":"user","currentBalanceUsd":8.125}}"#)
+        #expect(try HuggingFaceWebCreditsParser.parse(both) == 8.125)
+    }
+
+    @Test
+    func `wallet parser rejects invalid or ambiguous upstream values`() {
+        let currentCases: [(String, HuggingFaceWebCreditsParser.ParseError)] = [
+            (#"{"entity":{"type":"user","currentBalanceUsd":null}}"#, .invalidCurrentBalance),
+            (#"{"entity":{"type":"user","currentBalanceUsd":"12.34"}}"#, .invalidCurrentBalance),
+            (#"{"entity":{"type":"user","currentBalanceUsd":true}}"#, .invalidCurrentBalance),
+            (#"{"entity":{"type":"user","currentBalanceUsd":-0.01}}"#, .invalidCurrentBalance),
+            (#"{"entity":{"type":"organization","currentBalanceUsd":12.34}}"#, .invalidCurrentBalance),
+        ]
+        for (json, expected) in currentCases {
+            #expect(Self.parserError(Self.dataProps(json)) == expected)
+        }
+
+        let legacyCases: [(String, HuggingFaceWebCreditsParser.ParseError)] = [
+            (#"{"invoiceCreditsCents":12.5}"#, .invalidLegacyBalance),
+            (#"{"invoiceCreditsCents":-1}"#, .invalidLegacyBalance),
+            (#"{"invoiceCreditsCents":9007199254740992}"#, .invalidLegacyBalance),
+            (#"{"invoiceCreditsCents":true}"#, .invalidLegacyBalance),
+        ]
+        for (json, expected) in legacyCases {
+            #expect(Self.parserError(Self.dataProps(json)) == expected)
+        }
+
+        let ambiguousCurrent = Self.dataProps(#"{"entity":{"type":"user","currentBalanceUsd":1}}"#)
+            + Self.dataProps(#"{"entity":{"type":"user","currentBalanceUsd":2}}"#)
+        #expect(Self.parserError(ambiguousCurrent) == .ambiguousCurrentBalance)
+
+        let ambiguousLegacy = Self.dataProps(#"{"invoiceCreditsCents":100}"#)
+            + Self.dataProps(#"{"invoiceCreditsCents":200}"#)
+        #expect(Self.parserError(ambiguousLegacy) == .ambiguousLegacyBalance)
+    }
+
+    @Test
+    func `wallet parser decodes only billing div data props attributes`() throws {
+        let unrelated = Self.dataProps(#"{"kind":"navigation"}"#)
+        let billing = Self.dataProps(
+            #"{"entity":{"type":"user","name":"fixture-user","currentBalanceUsd":4.5}}"#)
+        #expect(try HuggingFaceWebCreditsParser.parse(unrelated + billing) == 4.5)
+
+        let nonDiv = #"<span data-props="{&quot;invoiceCreditsCents&quot;:100}">ignored</span>"#
+        #expect(Self.parserError(nonDiv) == .unavailable)
+        #expect(Self.parserError(#"<div data-props="{&quot;entity&quot;:"></div>"#) == .malformedJSON)
+    }
+
+    @Test
+    func `web wallet request carries only the session cookie and returns no account identity`() async throws {
+        let transport = ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            let payload =
+                #"{"entity":{"type":"user","name":"unverified-name","user":"fixture-user","currentBalanceUsd":12.34}}"#
+            return try Self.htmlResponse(
+                url: url,
+                body: Self.dataProps(payload),
+                statusCode: 200)
+        }
+        let context = Self.fetchContext(sourceMode: .web, settings: Self.manualCookieSettings())
+        let strategy = HuggingFaceWebFetchStrategy(
+            transport: transport,
+            resolveCookieHeader: { _ in "session=fixture" })
+
+        #expect(await strategy.isAvailable(context))
+        let result = try await strategy.fetch(context)
+        let request = try #require(await transport.requests().first)
+
+        #expect(result.strategyID == "huggingface.web")
+        #expect(result.strategyKind == .web)
+        #expect(result.sourceLabel == "web")
+        #expect(result.usage.providerCost?.used == 0)
+        #expect(result.usage.providerCost?.balance == 12.34)
+        #expect(result.usage.providerCost?.period == "Prepaid credits")
+        #expect(result.usage.identity == nil)
+        #expect(request.url?.absoluteString == "https://huggingface.co/settings/billing")
+        #expect(request.httpMethod == "GET")
+        #expect(request.value(forHTTPHeaderField: "Cookie") == "session=fixture")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(request.value(forHTTPHeaderField: "Accept") == "text/html,application/xhtml+xml")
+        #expect(request.httpBody == nil)
+    }
+
+    @Test
+    func `web wallet rejects login redirects wrong hosts statuses and content types`() async throws {
+        let cases: [(URL, Int, String, HuggingFaceWebCreditsError)] = try [
+            (
+                #require(URL(string: "https://huggingface.co/login?next=%2Fsettings%2Fbilling")),
+                200,
+                "text/html",
+                .authenticationExpired),
+            (#require(URL(string: "https://example.com/settings/billing")), 200, "text/html", .invalidResponse),
+            (HuggingFaceWebFetchStrategy.billingURL, 403, "text/html", .invalidResponse),
+            (HuggingFaceWebFetchStrategy.billingURL, 200, "application/json", .invalidResponse),
+        ]
+
+        for (url, status, contentType, expected) in cases {
+            let transport = ProviderHTTPTransportStub { _ in
+                try Self.htmlResponse(url: url, body: "<html></html>", statusCode: status, contentType: contentType)
+            }
+            let strategy = HuggingFaceWebFetchStrategy(
+                transport: transport,
+                resolveCookieHeader: { _ in "session=fixture" })
+            do {
+                _ = try await strategy.fetch(Self.fetchContext(
+                    sourceMode: .web,
+                    settings: Self.manualCookieSettings()))
+                Issue.record("Expected Hugging Face web response to fail")
+            } catch let error as HuggingFaceWebCreditsError {
+                #expect(error == expected)
+            } catch {
+                Issue.record("Unexpected Hugging Face web error: \(error)")
+            }
+        }
+    }
+
+    @Test
+    func `explicit web remains separate when API credentials are present`() async throws {
+        let webTransport = Self.walletTransport(balance: 9.25)
+        let web = HuggingFaceWebFetchStrategy(
+            transport: webTransport,
+            resolveCookieHeader: { _ in "session=fixture" })
+        let result = try await web.fetch(Self.fetchContext(
+            sourceMode: .web,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings()))
+
+        #expect(result.strategyID == "huggingface.web")
+        #expect(result.usage.providerCost?.used == 0)
+        #expect(result.usage.providerCost?.balance == 9.25)
+        #expect(result.usage.identity == nil)
+        #expect(result.usage.details.isEmpty)
+        #expect(await webTransport.requests().count == 1)
+    }
+
+    @Test
+    func `auto merges wallet into API spend without changing API-owned fields`() async throws {
+        let recorder = HuggingFaceCookieResolutionRecorder()
+        let apiTransport = Self.transport()
+        let webTransport = Self.walletTransport(balance: 9.25)
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: apiTransport),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: webTransport,
+                resolveCookieHeader: { _ in
+                    await recorder.record()
+                    return "session=fixture"
+                }))
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings()))
+
+        #expect(result.strategyID == "huggingface.js")
+        #expect(result.sourceLabel == "api")
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == 9.25)
+        #expect(result.usage.providerCost?.period == "Reported billing period")
+        #expect(result.usage.providerCost?.resetsAt == Self.date("2026-09-01T00:00:00Z"))
+        #expect(result.usage.identity?.accountID == "fixture-user")
+        #expect(result.usage.details.count == 2)
+        #expect(result.usage.dataConfidence == .exact)
+        #expect(await recorder.count == 1)
+        #expect(await apiTransport.requests().count == 2)
+        #expect(await webTransport.requests().count == 1)
+    }
+
+    @Test
+    func `auto leaves the optional wallet untouched when enrichment is disabled`() async throws {
+        let recorder = HuggingFaceCookieResolutionRecorder()
+        let webTransport = Self.walletTransport(balance: 9.25)
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: webTransport,
+                resolveCookieHeader: { _ in
+                    await recorder.record()
+                    return "session=fixture"
+                }))
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings(),
+            includeOptionalUsage: false))
+
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == nil)
+        #expect(await recorder.count == .zero)
+        #expect(await webTransport.requests().isEmpty)
+    }
+
+    @Test
+    func `auto preserves API spend when wallet enrichment is unavailable`() async throws {
+        let webTransport = ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            return try Self.htmlResponse(url: url, body: "<html>signed out</html>", statusCode: 403)
+        }
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: webTransport,
+                resolveCookieHeader: { _ in "session=fixture" }))
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings()))
+
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == nil)
+        #expect(result.usage.identity?.accountID == "fixture-user")
+        #expect(result.usage.details.count == 2)
+    }
+
+    @Test
+    func `auto preserves API spend when wallet is malformed`() async throws {
+        let webTransport = ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            return try Self.htmlResponse(
+                url: url,
+                body: Self.dataProps(#"{"entity":{"type":"user","currentBalanceUsd":"9.25"}}"#),
+                statusCode: 200)
+        }
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: webTransport,
+                resolveCookieHeader: { _ in "session=fixture" }))
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings()))
+
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == nil)
+        #expect(result.usage.identity?.accountID == "fixture-user")
+    }
+
+    @Test
+    func `auto merges a known zero wallet instead of treating it as unavailable`() async throws {
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: Self.walletTransport(balance: 0),
+                resolveCookieHeader: { _ in "session=fixture" }))
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings()))
+
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == 0)
+    }
+
+    @Test
+    func `auto falls back to cookie only balance when API is unavailable`() async throws {
+        let cookieOnly = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: Self.walletTransport(balance: 7.5),
+                resolveCookieHeader: { _ in "session=fixture" }))
+        let cookieOnlyContext = Self.fetchContext(
+            sourceMode: .auto,
+            environment: [:],
+            settings: Self.manualCookieSettings())
+        #expect(await cookieOnly.isAvailable(cookieOnlyContext))
+        let cookieOnlyResult = try await cookieOnly.fetch(cookieOnlyContext)
+        #expect(cookieOnlyResult.usage.providerCost?.used == 0)
+        #expect(cookieOnlyResult.usage.providerCost?.balance == 7.5)
+        #expect(cookieOnlyResult.usage.identity == nil)
+    }
+
+    @Test
+    func `API mode and off mode perform zero cookie work`() async throws {
+        let recorder = HuggingFaceCookieResolutionRecorder()
+        let strategy = HuggingFaceWebFetchStrategy(resolveCookieHeader: { _ in
+            await recorder.record()
+            return "session=fixture"
+        })
+
+        do {
+            _ = try await strategy.fetch(Self.fetchContext(
+                sourceMode: .api,
+                settings: Self.manualCookieSettings()))
+            Issue.record("Expected API mode to reject the web strategy")
+        } catch let error as HuggingFaceWebCreditsError {
+            #expect(error == .unavailable)
+        }
+        #expect(await recorder.count == .zero)
+
+        let offContext = Self.fetchContext(sourceMode: .web, settings: Self.cookieSettings(source: .off))
+        #expect(await strategy.isAvailable(offContext) == false)
+        do {
+            _ = try await strategy.fetch(offContext)
+            Issue.record("Expected off mode to reject the web strategy")
+        } catch let error as HuggingFaceWebCreditsError {
+            #expect(error == .unavailable)
+        }
+        #expect(await recorder.count == .zero)
+    }
+
+    @Test
+    func `auto uses API only when the web source is off`() async throws {
+        let recorder = HuggingFaceCookieResolutionRecorder()
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(resolveCookieHeader: { _ in
+                await recorder.record()
+                return "session=fixture"
+            }))
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.cookieSettings(source: .off)))
+
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == nil)
+        #expect(await recorder.count == .zero)
+    }
+
+    @Test
+    func `web cancellation propagates`() async throws {
+        let transport = ProviderHTTPTransportStub { _ in
+            throw CancellationError()
+        }
+        let strategy = HuggingFaceWebFetchStrategy(
+            transport: transport,
+            resolveCookieHeader: { _ in "session=fixture" })
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await strategy.fetch(Self.fetchContext(
+                sourceMode: .web,
+                settings: Self.manualCookieSettings()))
+        }
     }
 
     private static func fetch(
@@ -418,19 +749,106 @@ struct HuggingFaceUsageStatsTests {
         return (Data(body.utf8), response)
     }
 
-    private static func fetchContext(environment: [String: String]) -> ProviderFetchContext {
+    private static func fetchContext(
+        sourceMode: ProviderSourceMode = .api,
+        environment: [String: String] = [:],
+        settings: ProviderSettingsSnapshot? = nil,
+        includeOptionalUsage: Bool = true,
+        webTimeout: TimeInterval = 1) -> ProviderFetchContext
+    {
         ProviderFetchContext(
             runtime: .app,
-            sourceMode: .api,
+            sourceMode: sourceMode,
             includeCredits: false,
-            webTimeout: 1,
+            includeOptionalUsage: includeOptionalUsage,
+            webTimeout: webTimeout,
             webDebugDumpHTML: false,
             verbose: false,
             env: environment,
-            settings: nil,
+            settings: settings,
             fetcher: UsageFetcher(environment: environment),
             claudeFetcher: HuggingFaceTestClaudeFetcher(),
             browserDetection: BrowserDetection(cacheTTL: 0))
+    }
+
+    private static func manualCookieSettings() -> ProviderSettingsSnapshot {
+        self.cookieSettings(source: .manual, manualCookieHeader: "session=fixture")
+    }
+
+    private static func cookieSettings(
+        source: ProviderCookieSource,
+        manualCookieHeader: String? = nil) -> ProviderSettingsSnapshot
+    {
+        ProviderSettingsSnapshot.make(huggingface: HuggingFaceProviderSettings(
+            cookieSource: source,
+            manualCookieHeader: manualCookieHeader))
+    }
+
+    private static func parserError(_ html: String) -> HuggingFaceWebCreditsParser.ParseError? {
+        do {
+            _ = try HuggingFaceWebCreditsParser.parse(html)
+            return nil
+        } catch let error as HuggingFaceWebCreditsParser.ParseError {
+            return error
+        } catch {
+            Issue.record("Unexpected Hugging Face parser error: \(error)")
+            return nil
+        }
+    }
+
+    private static func dataProps(_ json: String) -> String {
+        let encoded = json
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+        return #"<div class="billing" data-props="\#(encoded)"></div>"#
+    }
+
+    private static func htmlResponse(
+        url: URL,
+        body: String,
+        statusCode: Int,
+        contentType: String = "text/html; charset=utf-8") throws -> (Data, URLResponse)
+    {
+        let response = try #require(HTTPURLResponse(
+            url: url,
+            statusCode: statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": contentType]))
+        return (Data(body.utf8), response)
+    }
+
+    private static func walletTransport(balance: Double) -> ProviderHTTPTransportStub {
+        ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            let json = #"""
+            {
+              "entity": {
+                "type": "user",
+                "name": "unverified-name",
+                "user": "fixture-user",
+                "currentBalanceUsd": \#(balance)
+              }
+            }
+            """#
+            return try Self.htmlResponse(
+                url: url,
+                body: Self.dataProps(json),
+                statusCode: 200)
+        }
+    }
+
+    private static func apiStrategy(transport: any ProviderHTTPTransport) -> ScriptFetchStrategy {
+        ScriptFetchStrategy(
+            id: "huggingface.js",
+            provider: .huggingface,
+            bundledPlugin: "huggingface",
+            secretKey: HuggingFaceSettingsReader.tokenEnvironmentKey,
+            sourceLabel: "api",
+            transport: transport,
+            resolveSecret: { environment in
+                HuggingFaceSettingsReader.token(environment: environment)
+            },
+            isEnabled: { _ in true })
     }
 
     private static func date(_ string: String) -> Date? {
@@ -472,9 +890,52 @@ struct HuggingFaceUsageStatsTests {
 }
 
 @MainActor
+struct HuggingFaceProviderPresentationTests {
+    @Test
+    func `billing spend remains visible when cost summary is disabled`() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let snapshot = UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            providerCost: ProviderCostSnapshot(
+                used: 2.41,
+                limit: 0,
+                currencyCode: "USD",
+                period: "Reported billing period",
+                resetsAt: ISO8601DateFormatter().date(from: "2026-09-01T00:00:00Z"),
+                updatedAt: now),
+            updatedAt: now)
+
+        let model = UsageMenuCardView.Model.make(.init(
+            provider: .huggingface,
+            metadata: HuggingFaceProviderDescriptor.descriptor.metadata,
+            snapshot: snapshot,
+            credits: nil,
+            creditsError: nil,
+            dashboard: nil,
+            dashboardError: nil,
+            tokenSnapshot: nil,
+            tokenError: nil,
+            account: AccountInfo(email: nil, plan: nil),
+            isRefreshing: false,
+            lastError: nil,
+            usageBarsShowUsed: true,
+            resetTimeDisplayStyle: .countdown,
+            tokenCostUsageEnabled: false,
+            costSummaryInlineEnabled: false,
+            showOptionalCreditsAndExtraUsage: true,
+            hidePersonalInfo: false,
+            now: now))
+
+        #expect(model.providerCost?.title == "API spend")
+        #expect(model.providerCost?.spendLine == "Reported billing period: $2.41")
+    }
+}
+
+@MainActor
 struct HuggingFaceProviderSettingsTests {
     @Test
-    func `settings expose one secure API token field`() throws {
+    func `settings expose API and cookie sources with deliberate app availability`() throws {
         let suite = "HuggingFaceProviderSettingsTests-token"
         let defaults = try #require(UserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
@@ -510,7 +971,7 @@ struct HuggingFaceProviderSettingsTests {
 
         let implementation = HuggingFaceProviderImplementation()
         let fields = implementation.settingsFields(context: context)
-        #expect(fields.count == 1)
+        #expect(fields.count == 2)
         let field = try #require(fields.first)
         #expect(field.id == "huggingface-api-token")
         #expect(field.title == "API token")
@@ -523,6 +984,54 @@ struct HuggingFaceProviderSettingsTests {
             provider: .huggingface,
             settings: settings,
             environment: [:])))
+
+        let picker = try #require(implementation.settingsPickers(context: context).first)
+        #expect(picker.id == "huggingface-cookie-source")
+        #expect(picker.options.map(\.id) == ["auto", "manual", "off"])
+        #expect(fields[1].isVisible?() == false)
+        picker.binding.wrappedValue = ProviderCookieSource.manual.rawValue
+        #expect(fields[1].isVisible?() == true)
+        #expect(fields[1].actions.first?.id == "huggingface-open-billing")
+
+        field.binding.wrappedValue = ""
+        fields[1].binding.wrappedValue = "session=fixture"
+        #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
+            provider: .huggingface,
+            settings: settings,
+            environment: [:])))
+
+        field.binding.wrappedValue = "hf_second_fixture_token"
+        #expect(settings.huggingFaceCookieSource == .manual)
+        #expect(settings.huggingFaceManualCookieHeader == "session=fixture")
+        field.binding.wrappedValue = ""
+
+        fields[1].binding.wrappedValue = ""
+        #expect(settings.huggingFaceCookieSource == .manual)
+        #expect(settings.huggingFaceManualCookieHeader.isEmpty)
+        #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
+            provider: .huggingface,
+            settings: settings,
+            environment: [:])) == false)
+
+        picker.binding.wrappedValue = ProviderCookieSource.auto.rawValue
+        #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
+            provider: .huggingface,
+            settings: settings,
+            environment: [:])))
+
+        picker.binding.wrappedValue = ProviderCookieSource.off.rawValue
+        #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
+            provider: .huggingface,
+            settings: settings,
+            environment: [:])) == false)
+    }
+}
+
+private actor HuggingFaceCookieResolutionRecorder {
+    private(set) var count = 0
+
+    func record() {
+        self.count += 1
     }
 }
 
