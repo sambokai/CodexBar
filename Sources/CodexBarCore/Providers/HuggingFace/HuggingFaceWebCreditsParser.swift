@@ -2,11 +2,9 @@ import Foundation
 
 public struct HuggingFaceWebCreditsSnapshot: Equatable, Sendable {
     public let balanceUSD: Double
-    public let accountID: String?
 
-    public init(balanceUSD: Double, accountID: String?) {
+    public init(balanceUSD: Double) {
         self.balanceUSD = balanceUSD
-        self.accountID = accountID
     }
 }
 
@@ -47,7 +45,7 @@ public enum HuggingFaceWebCreditsParser {
         guard !payloads.isEmpty else { throw ParseError.unavailable }
 
         var currentEntities: [[String: Any]] = []
-        var legacyValues: [(value: Any, accountID: String?)] = []
+        var legacyValues: [Any] = []
         for payload in payloads {
             guard let data = payload.data(using: .utf8) else {
                 throw ParseError.malformedJSON
@@ -65,10 +63,7 @@ public enum HuggingFaceWebCreditsParser {
                 currentEntities.append(entity)
             }
             if let legacy = dictionary["invoiceCreditsCents"] {
-                let accountID = entity?["type"] as? String == "user"
-                    ? self.accountID(entity?["name"])
-                    : nil
-                legacyValues.append((legacy, accountID))
+                legacyValues.append(legacy)
             }
         }
 
@@ -80,19 +75,15 @@ public enum HuggingFaceWebCreditsParser {
             guard let value = self.nonNegativeFiniteNumber(entity["currentBalanceUsd"]) else {
                 throw ParseError.invalidCurrentBalance
             }
-            return HuggingFaceWebCreditsSnapshot(
-                balanceUSD: value,
-                accountID: self.accountID(entity["name"]))
+            return HuggingFaceWebCreditsSnapshot(balanceUSD: value)
         }
 
         guard !legacyValues.isEmpty else { throw ParseError.unavailable }
         guard legacyValues.count == 1 else { throw ParseError.ambiguousLegacyBalance }
-        guard let cents = self.legacyCents(legacyValues[0].value) else {
+        guard let cents = self.legacyCents(legacyValues[0]) else {
             throw ParseError.invalidLegacyBalance
         }
-        return HuggingFaceWebCreditsSnapshot(
-            balanceUSD: cents / 100,
-            accountID: legacyValues[0].accountID)
+        return HuggingFaceWebCreditsSnapshot(balanceUSD: cents / 100)
     }
 
     private static func dataPropsPayloads(in html: String) throws -> [String] {
@@ -162,12 +153,6 @@ public enum HuggingFaceWebCreditsParser {
             }
             return nil
         }
-    }
-
-    private static func accountID(_ value: Any?) -> String? {
-        guard let value = value as? String else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func nonNegativeFiniteNumber(_ value: Any?) -> Double? {

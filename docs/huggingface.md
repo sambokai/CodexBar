@@ -1,8 +1,8 @@
 ---
-summary: "Hugging Face provider: bearer-token spend plus optional browser-session prepaid Credits balance."
+summary: "Hugging Face provider: bearer-token spend and a separate browser-session prepaid Credits balance."
 read_when:
   - Configuring Hugging Face usage or prepaid Credits
-  - Debugging Hugging Face billing-page cookie enrichment
+  - Debugging the Hugging Face billing-page wallet source
   - Reviewing Hugging Face spend versus wallet presentation
 ---
 
@@ -16,9 +16,10 @@ source reports billing-period spend and category totals. The optional web source
 
 1. Open **Settings -> Providers** and enable **Hugging Face**.
 2. Configure a Hugging Face user access token, or set `HF_TOKEN`, for API-reported spend.
-3. To show the prepaid wallet, leave **Cookie source** on **Automatic** after signing in to Hugging Face in a supported
-   browser, or select **Manual** and paste a full `Cookie:` header from `huggingface.co/settings/billing`.
-4. Select **Off** to disable billing-page cookie enrichment while retaining the API source.
+3. To show the prepaid wallet, select the provider's **Web** source. Leave **Cookie source** on **Automatic** after
+   signing in to Hugging Face in a supported browser, or select **Manual** and paste a full `Cookie:` header from
+   `huggingface.co/settings/billing`.
+4. Select **Off** to disable billing-page cookie access while retaining the API source.
 
 The web source can show a balance without an API token. Automatic cookie import is limited to `huggingface.co` and
 uses CodexBar's shared cached-cookie/browser-import path. Ordinary refresh does not open a browser or prompt for
@@ -37,13 +38,18 @@ the current field is absent, CodexBar accepts the legacy top-level `invoiceCredi
 non-negative, JavaScript-safe integer and converts it from cents exactly once. It does not use visible page text,
 `includedNanoUsd`, `usedNanoUsd`, `limitNanoUsd`, plan entitlements, or reported spend to derive a wallet balance.
 
+Hugging Face's current billing frontend distinguishes the two namespace fields in the server-rendered entity: it uses
+`entity.user` for a personal namespace and `entity.name` for an organization namespace. The official Hub client
+separately defines `/api/whoami-v2.name` as the bearer token's username. Because `entity.name` is not the same proven
+personal-account identifier, CodexBar does not use it to correlate or combine independently authenticated results.
+
 ## Display and source modes
 
-- **Auto** keeps bearer-token spend authoritative and adds the wallet only when the billing-page entity name and the
-  bearer `whoami-v2` account name match. A mismatch or missing identity omits enrichment instead of mixing accounts.
+- **Auto** uses bearer-token spend when an API token is available and does not request or merge the web wallet. Without
+  an API token, Auto can fall back to a web-only wallet result when billing cookies are enabled.
 - **API** uses the bearer-token spend path and never looks up cookies or requests the billing page.
-- **Web** requests the billing page and can display a balance-only snapshot when API spend is unavailable. When API
-  spend is available, it is combined only after the same account-identity check; otherwise the wallet remains separate.
+- **Web** requests only the billing page and returns a balance-only snapshot. It does not request bearer spend or attach
+  an account identity from the billing entity.
 
 The provider Balance layout token and the provider balance row show the reported prepaid wallet. Hugging Face
 Inference usage remaining and billing-period spend are separate concepts and are never substituted for Credits.
@@ -55,10 +61,10 @@ Inference usage remaining and billing-period spend are separate concepts and are
 Sign in to Hugging Face, open the billing page, and refresh. If automatic import is unavailable, switch to **Manual**
 and paste a full `Cookie:` header for `huggingface.co`.
 
-### The wallet is missing but spend is shown
+### Spend is shown instead of the wallet
 
-The billing-page enrichment is optional. A missing/expired session, login redirect, non-HTML response, malformed
-server-rendered payload, or unproven account match omits the wallet and leaves valid API spend unchanged.
+This is expected in Auto when an API token is available. Select **Web** to request the separate prepaid wallet. A
+missing/expired session, login redirect, non-HTML response, or malformed server-rendered payload leaves it unavailable.
 
 ### The wallet shows `$0.00`
 

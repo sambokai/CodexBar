@@ -94,7 +94,7 @@ public enum HuggingFaceProviderDescriptor {
                 case .api, .cli, .oauth:
                     return [api]
                 case .web:
-                    return [HuggingFaceWebFetchStrategy(apiStrategy: api)]
+                    return [HuggingFaceWebFetchStrategy()]
                 case .auto:
                     return [HuggingFaceAutoFetchStrategy(
                         apiStrategy: api,

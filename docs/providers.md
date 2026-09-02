@@ -88,7 +88,7 @@ complete when the available scan window covers fewer days.
 | Ollama | API key verifies Cloud API access (`api`); browser cookies expose Cloud quota windows (`web`). |
 | Synthetic | API key from config/env → quota API (`api`). |
 | OpenRouter | API token (config, overrides env) → credits API (`api`). |
-| Hugging Face | API token for personal billing spend (`api`), optionally enriched by the prepaid Credits wallet from browser-session billing data (`web`). |
+| Hugging Face | Auto: API token for personal billing spend (`api`) when available, otherwise a browser-session prepaid Credits wallet (`web`). API and Web results are never combined; explicit Web is wallet-only. |
 | Perplexity | Browser cookies/manual cookie/env session token → credits API (`web`). |
 | Xiaomi MiMo | Browser cookies → balance/token plan endpoints (`web`). |
 | Doubao | API key from config/env → Volcengine Ark chat-completions probe (`api`). |

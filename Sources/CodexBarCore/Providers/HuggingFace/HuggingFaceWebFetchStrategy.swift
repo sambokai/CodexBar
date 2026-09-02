@@ -19,17 +19,14 @@ struct HuggingFaceWebFetchStrategy: ProviderFetchStrategy {
 
     private let transport: any ProviderHTTPTransport
     private let resolveCookieHeader: CookieHeaderResolver
-    private let apiStrategy: ScriptFetchStrategy?
 
     init(
         transport: any ProviderHTTPTransport = ProviderHTTPClient.shared,
-        apiStrategy: ScriptFetchStrategy? = nil,
         resolveCookieHeader: @escaping CookieHeaderResolver = { context in
             try await ProviderPluginCookieBroker.resolver(context: context)(.huggingface, Self.host)
         })
     {
         self.transport = transport
-        self.apiStrategy = apiStrategy
         self.resolveCookieHeader = resolveCookieHeader
     }
 
@@ -107,62 +104,17 @@ struct HuggingFaceWebFetchStrategy: ProviderFetchStrategy {
             period: "Prepaid credits",
             balance: wallet.balanceUSD,
             updatedAt: now)
-        let identity = wallet.accountID.map {
-            ProviderIdentitySnapshot(
-                providerID: .huggingface,
-                accountEmail: nil,
-                accountOrganization: nil,
-                loginMethod: "Web session",
-                accountID: $0)
-        }
         let usage = UsageSnapshot(
             primary: nil,
             secondary: nil,
             providerCost: cost,
             updatedAt: now,
-            identity: identity)
-        let webResult = self.makeResult(usage: usage, sourceLabel: "web")
-
-        guard let apiStrategy else { return webResult }
-        guard await apiStrategy.isAvailable(context) else { return webResult }
-        do {
-            let apiResult = try await apiStrategy.fetch(context)
-            return Self.merging(balanceResult: webResult, into: apiResult) ?? webResult
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            return webResult
-        }
+            identity: nil)
+        return self.makeResult(usage: usage, sourceLabel: "web")
     }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {
         false
-    }
-
-    static func merging(
-        balanceResult: ProviderFetchResult,
-        into apiResult: ProviderFetchResult) -> ProviderFetchResult?
-    {
-        guard self.accountIDsMatch(
-            balanceResult.usage.identity?.accountID,
-            apiResult.usage.identity?.accountID)
-        else { return nil }
-        guard let balance = balanceResult.usage.providerCost?.balance,
-              let apiCost = apiResult.usage.providerCost
-        else { return nil }
-        let usage = apiResult.usage.withProviderCost(apiCost.replacing(balance: balance))
-        return apiResult.withUsage(usage)
-    }
-
-    private static func accountIDsMatch(_ lhs: String?, _ rhs: String?) -> Bool {
-        func normalized(_ value: String?) -> String? {
-            guard let value else { return nil }
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed.lowercased()
-        }
-
-        guard let lhs = normalized(lhs), let rhs = normalized(rhs) else { return false }
-        return lhs == rhs
     }
 }
 
@@ -186,75 +138,15 @@ struct HuggingFaceAutoFetchStrategy: ProviderFetchStrategy {
     }
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
-        guard await self.apiStrategy.isAvailable(context) else {
-            return try await self.webStrategy.fetch(context)
+        if await self.apiStrategy.isAvailable(context) {
+            // The billing page and bearer token are independently authenticated. The current billing contract does
+            // not expose a verified identity key that can safely correlate them, so Auto never mixes their results.
+            return try await self.apiStrategy.fetch(context)
         }
-
-        let apiResult = try await self.apiStrategy.fetch(context)
-        guard context.includeOptionalUsage,
-              await self.webStrategy.isAvailable(context)
-        else { return apiResult }
-
-        do {
-            let balanceResult = try await self.webStrategy.fetch(context)
-            return HuggingFaceWebFetchStrategy.merging(balanceResult: balanceResult, into: apiResult) ?? apiResult
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            // Billing-page enrichment is optional. A valid bearer spend result remains authoritative when it fails.
-            return apiResult
-        }
+        return try await self.webStrategy.fetch(context)
     }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {
         false
-    }
-}
-
-extension UsageSnapshot {
-    fileprivate func withProviderCost(_ providerCost: ProviderCostSnapshot?) -> UsageSnapshot {
-        UsageSnapshot(
-            primary: self.primary,
-            secondary: self.secondary,
-            tertiary: self.tertiary,
-            extraRateWindows: self.extraRateWindows,
-            providerCost: providerCost,
-            costUsage: self.costUsage,
-            details: self.details,
-            deepseekDetailedUsageState: self.deepseekDetailedUsageState,
-            deepseekPlatformProfiles: self.deepseekPlatformProfiles,
-            opencodegoUsage: self.opencodegoUsage,
-            openAIAPIUsage: self.openAIAPIUsage,
-            codexResetCredits: self.codexResetCredits,
-            mistralUsage: self.mistralUsage,
-            commandCodeSubscriptionEnrichmentUnavailable: self.commandCodeSubscriptionEnrichmentUnavailable,
-            commandCodeHasSubscriptionPlan: self.commandCodeHasSubscriptionPlan,
-            commandCodeMonthlyGrantDepleted: self.commandCodeMonthlyGrantDepleted,
-            subscriptionExpiresAt: self.subscriptionExpiresAt,
-            subscriptionRenewsAt: self.subscriptionRenewsAt,
-            updatedAt: self.updatedAt,
-            identity: self.identity,
-            dataConfidence: self.dataConfidence)
-    }
-}
-
-extension ProviderFetchResult {
-    fileprivate func withUsage(_ usage: UsageSnapshot) -> ProviderFetchResult {
-        ProviderFetchResult(
-            usage: usage,
-            credits: self.credits,
-            dashboard: self.dashboard,
-            sourceLabel: self.sourceLabel,
-            strategyID: self.strategyID,
-            strategyKind: self.strategyKind,
-            codexResetCreditsAttempted: self.codexResetCreditsAttempted,
-            codexMonthlyLimitEnrichmentFailed: self.codexMonthlyLimitEnrichmentFailed,
-            diagnostic: self.diagnostic,
-            claudeOAuthKeychainPersistentRefHash: self.claudeOAuthKeychainPersistentRefHash,
-            claudeOAuthHistoryOwnerIdentifier: self.claudeOAuthHistoryOwnerIdentifier,
-            claudeOAuthCredentialOwner: self.claudeOAuthCredentialOwner,
-            claudeOAuthKeychainCredentialMismatch: self.claudeOAuthKeychainCredentialMismatch,
-            claudeOAuthKeychainCredentialAbsent: self.claudeOAuthKeychainCredentialAbsent,
-            claudeOAuthKeychainCredentialUnavailable: self.claudeOAuthKeychainCredentialUnavailable)
     }
 }

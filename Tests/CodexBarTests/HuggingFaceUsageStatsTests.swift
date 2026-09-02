@@ -348,28 +348,26 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test
-    func `current server rendered wallet retains account ownership and uses USD`() throws {
+    func `current server rendered wallet uses USD without asserting account ownership`() throws {
         let current = Self.dataProps(
-            #"{"entity":{"type":"user","name":"fixture-user","currentBalanceUsd":12.345}}"#)
+            #"{"entity":{"type":"user","name":"unverified-name","user":"fixture-user","currentBalanceUsd":12.345}}"#)
         let snapshot = try HuggingFaceWebCreditsParser.parseSnapshot(current)
         #expect(snapshot.balanceUSD == 12.345)
-        #expect(snapshot.accountID == "fixture-user")
 
         let zero = Self.dataProps(
-            #"{"entity":{"type":"user","name":"fixture-user","currentBalanceUsd":0}}"#)
+            #"{"entity":{"type":"user","name":"unverified-name","user":"fixture-user","currentBalanceUsd":0}}"#)
         #expect(try HuggingFaceWebCreditsParser.parse(zero) == 0)
         #expect(Self.parserError("<div>Credits remaining: $12.34</div>") == .unavailable)
     }
 
     @Test
-    func `legacy invoice credits convert once and cannot invent account ownership`() throws {
+    func `legacy invoice credits convert once`() throws {
         let legacy = Self.dataProps(#"{"invoiceCreditsCents":7250}"#)
         let snapshot = try HuggingFaceWebCreditsParser.parseSnapshot(legacy)
         #expect(snapshot.balanceUSD == 72.5)
-        #expect(snapshot.accountID == nil)
 
         let both = Self.dataProps(
-            #"{"invoiceCreditsCents":7250,"entity":{"type":"user","name":"fixture-user","currentBalanceUsd":8.125}}"#)
+            #"{"invoiceCreditsCents":7250,"entity":{"type":"user","currentBalanceUsd":8.125}}"#)
         #expect(try HuggingFaceWebCreditsParser.parse(both) == 8.125)
     }
 
@@ -418,13 +416,14 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test
-    func `web wallet request carries only the session cookie and retains its account`() async throws {
+    func `web wallet request carries only the session cookie and returns no account identity`() async throws {
         let transport = ProviderHTTPTransportStub { request in
             let url = try #require(request.url)
+            let payload =
+                #"{"entity":{"type":"user","name":"unverified-name","user":"fixture-user","currentBalanceUsd":12.34}}"#
             return try Self.htmlResponse(
                 url: url,
-                body: Self.dataProps(
-                    #"{"entity":{"type":"user","name":"fixture-user","currentBalanceUsd":12.34}}"#),
+                body: Self.dataProps(payload),
                 statusCode: 200)
         }
         let context = Self.fetchContext(sourceMode: .web, settings: Self.manualCookieSettings())
@@ -442,8 +441,7 @@ struct HuggingFaceUsageStatsTests {
         #expect(result.usage.providerCost?.used == 0)
         #expect(result.usage.providerCost?.balance == 12.34)
         #expect(result.usage.providerCost?.period == "Prepaid credits")
-        #expect(result.usage.identity?.providerID == .huggingface)
-        #expect(result.usage.identity?.accountID == "fixture-user")
+        #expect(result.usage.identity == nil)
         #expect(request.url?.absoluteString == "https://huggingface.co/settings/billing")
         #expect(request.httpMethod == "GET")
         #expect(request.value(forHTTPHeaderField: "Cookie") == "session=fixture")
@@ -486,49 +484,10 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test
-    func `same account web and API results merge only the wallet`() async throws {
-        let apiTransport = Self.transport()
-        let webTransport = Self.walletTransport(accountID: "FIXTURE-USER", balance: 9.25)
+    func `explicit web remains separate when API credentials are present`() async throws {
+        let webTransport = Self.walletTransport(balance: 9.25)
         let web = HuggingFaceWebFetchStrategy(
             transport: webTransport,
-            apiStrategy: Self.apiStrategy(transport: apiTransport),
-            resolveCookieHeader: { _ in "session=fixture" })
-        let result = try await web.fetch(Self.fetchContext(
-            sourceMode: .web,
-            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-            settings: Self.manualCookieSettings()))
-
-        #expect(result.usage.providerCost?.used == 2.41)
-        #expect(result.usage.providerCost?.balance == 9.25)
-        #expect(result.usage.identity?.accountID == "fixture-user")
-        #expect(result.usage.details.count == 2)
-    }
-
-    @Test
-    func `mismatched or unknown web account never enriches bearer spend`() async throws {
-        for accountID in ["different-user", nil] as [String?] {
-            let apiTransport = Self.transport()
-            let auto = HuggingFaceAutoFetchStrategy(
-                apiStrategy: Self.apiStrategy(transport: apiTransport),
-                webStrategy: HuggingFaceWebFetchStrategy(
-                    transport: Self.walletTransport(accountID: accountID, balance: 9.25),
-                    resolveCookieHeader: { _ in "session=fixture" }))
-            let result = try await auto.fetch(Self.fetchContext(
-                sourceMode: .auto,
-                environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-                settings: Self.manualCookieSettings()))
-
-            #expect(result.usage.providerCost?.used == 2.41)
-            #expect(result.usage.providerCost?.balance == nil)
-            #expect(result.usage.identity?.accountID == "fixture-user")
-        }
-    }
-
-    @Test
-    func `explicit web keeps a mismatched wallet separate from bearer spend`() async throws {
-        let web = HuggingFaceWebFetchStrategy(
-            transport: Self.walletTransport(accountID: "different-user", balance: 9.25),
-            apiStrategy: Self.apiStrategy(transport: Self.transport()),
             resolveCookieHeader: { _ in "session=fixture" })
         let result = try await web.fetch(Self.fetchContext(
             sourceMode: .web,
@@ -538,16 +497,41 @@ struct HuggingFaceUsageStatsTests {
         #expect(result.strategyID == "huggingface.web")
         #expect(result.usage.providerCost?.used == 0)
         #expect(result.usage.providerCost?.balance == 9.25)
-        #expect(result.usage.identity?.accountID == "different-user")
+        #expect(result.usage.identity == nil)
         #expect(result.usage.details.isEmpty)
+        #expect(await webTransport.requests().count == 1)
     }
 
     @Test
-    func `auto supports cookie only balance and fail soft API enrichment`() async throws {
+    func `auto keeps bearer spend and performs zero web cookie work`() async throws {
+        let recorder = HuggingFaceCookieResolutionRecorder()
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: Self.walletTransport(balance: 9.25),
+                resolveCookieHeader: { _ in
+                    await recorder.record()
+                    return "session=fixture"
+                }))
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings()))
+
+        #expect(result.strategyID == "huggingface.js")
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == nil)
+        #expect(result.usage.identity?.accountID == "fixture-user")
+        #expect(result.usage.details.count == 2)
+        #expect(await recorder.count == .zero)
+    }
+
+    @Test
+    func `auto falls back to cookie only balance when API is unavailable`() async throws {
         let cookieOnly = HuggingFaceAutoFetchStrategy(
             apiStrategy: Self.apiStrategy(transport: Self.transport()),
             webStrategy: HuggingFaceWebFetchStrategy(
-                transport: Self.walletTransport(accountID: "fixture-user", balance: 7.5),
+                transport: Self.walletTransport(balance: 7.5),
                 resolveCookieHeader: { _ in "session=fixture" }))
         let cookieOnlyContext = Self.fetchContext(
             sourceMode: .auto,
@@ -557,18 +541,7 @@ struct HuggingFaceUsageStatsTests {
         let cookieOnlyResult = try await cookieOnly.fetch(cookieOnlyContext)
         #expect(cookieOnlyResult.usage.providerCost?.used == 0)
         #expect(cookieOnlyResult.usage.providerCost?.balance == 7.5)
-
-        let failingWeb = HuggingFaceAutoFetchStrategy(
-            apiStrategy: Self.apiStrategy(transport: Self.transport()),
-            webStrategy: HuggingFaceWebFetchStrategy(
-                transport: ProviderHTTPTransportStub { _ in throw URLError(.notConnectedToInternet) },
-                resolveCookieHeader: { _ in "session=fixture" }))
-        let apiResult = try await failingWeb.fetch(Self.fetchContext(
-            sourceMode: .auto,
-            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-            settings: Self.manualCookieSettings()))
-        #expect(apiResult.usage.providerCost?.used == 2.41)
-        #expect(apiResult.usage.providerCost?.balance == nil)
+        #expect(cookieOnlyResult.usage.identity == nil)
     }
 
     @Test
@@ -755,11 +728,19 @@ struct HuggingFaceUsageStatsTests {
         return (Data(body.utf8), response)
     }
 
-    private static func walletTransport(accountID: String?, balance: Double) -> ProviderHTTPTransportStub {
+    private static func walletTransport(balance: Double) -> ProviderHTTPTransportStub {
         ProviderHTTPTransportStub { request in
             let url = try #require(request.url)
-            let name = accountID.map { ",\"name\":\"\($0)\"" } ?? ""
-            let json = #"{"entity":{"type":"user"\#(name),"currentBalanceUsd":\#(balance)}}"#
+            let json = #"""
+            {
+              "entity": {
+                "type": "user",
+                "name": "unverified-name",
+                "user": "fixture-user",
+                "currentBalanceUsd": \#(balance)
+              }
+            }
+            """#
             return try Self.htmlResponse(
                 url: url,
                 body: Self.dataProps(json),

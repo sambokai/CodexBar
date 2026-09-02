@@ -3,7 +3,7 @@
 ## 0.56.2 — 2026-08-31
 
 ### Added
-- Hugging Face: show the prepaid Credits wallet from an authenticated billing-page session, keeping bearer-token spend separate and merging only when both sources identify the same account.
+- Hugging Face: show the prepaid Credits wallet through a separate authenticated billing-page source; Auto keeps bearer-token spend separate because the two sources do not expose a proven shared account identifier.
 
 ### Performance
 - Local costs: reduce background CPU spent parsing native session timestamps and validating appended Codex history, preserving timestamp precision, daily totals, and fork accounting.
