@@ -2,6 +2,10 @@
 
 ## 0.56.3 — 2026-09-01
 
+### Added
+- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
+  bearer-token billing-period spend and category details.
+
 ### Performance
 - Claude and Vertex AI: reduce background CPU spent reading transcript metadata and looking up model prices during local cost scans, preserving provider detection and token/cost totals (#3319, #3328).
 - Local costs: skip unnecessary parsing work for discarded oversized log records, preserving complete-record validation and cost totals (#3342).
