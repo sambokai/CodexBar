@@ -11,6 +11,9 @@ enum ProviderCookieRefreshAction {
     enum ResultValidation {
         case webSource
         case providerCostBalance
+        /// Success requires both the Web source and a prepaid wallet balance, so an explicit browser
+        /// refresh can validate a Hugging Face wallet without composing it into an API billing snapshot.
+        case webProviderCostBalance
     }
 
     @TaskLocal static var isRefreshingCookie = false
@@ -20,6 +23,7 @@ enum ProviderCookieRefreshAction {
         cookieSource: @escaping () -> ProviderCookieSource,
         additionalVisibility: @escaping () -> Bool = { true },
         resultValidation: ResultValidation = .webSource,
+        sourceModeOverride: ProviderSourceMode? = nil,
         context: ProviderSettingsContext) -> ProviderSettingsActionDescriptor
     {
         ProviderSettingsActionDescriptor(
@@ -32,6 +36,7 @@ enum ProviderCookieRefreshAction {
                     await self.perform(
                         provider: provider,
                         resultValidation: resultValidation,
+                        sourceModeOverride: sourceModeOverride,
                         context: context)
                 }
             })
@@ -74,12 +79,16 @@ enum ProviderCookieRefreshAction {
     private static func perform(
         provider: UsageProvider,
         resultValidation: ResultValidation,
+        sourceModeOverride: ProviderSourceMode?,
         context: ProviderSettingsContext) async
     {
         context.setStatusText(self.statusID(provider), L("Refreshing"))
         let previousUpdatedAt = context.store.snapshot(for: provider.instanceID)?.updatedAt
         let outcome = await self.refresh(provider: provider) {
-            await context.store.refreshProvider(provider, allowDisabled: true)
+            await context.store.refreshProvider(
+                provider,
+                allowDisabled: true,
+                sourceModeOverride: sourceModeOverride)
             return self.resultIsValid(
                 provider: provider,
                 validation: resultValidation,
@@ -105,6 +114,9 @@ enum ProviderCookieRefreshAction {
             return context.store.lastSourceLabels[provider.instanceID] == "web"
         case .providerCostBalance:
             return snapshot.providerCost?.balance != nil
+        case .webProviderCostBalance:
+            return context.store.lastSourceLabels[provider.instanceID] == "web" &&
+                snapshot.providerCost?.balance != nil
         }
     }
 

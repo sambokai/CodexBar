@@ -137,86 +137,18 @@ struct HuggingFaceAutoFetchStrategy: ProviderFetchStrategy {
         return await self.webStrategy.isAvailable(context)
     }
 
+    /// Auto fetches from exactly one authority per refresh: bearer-token billing when an API credential is
+    /// available, and otherwise the browser-session wallet. An independently authenticated browser wallet is never
+    /// composed into an API billing snapshot because Hugging Face exposes no shared account identifier across both
+    /// authentication paths. `includeOptionalUsage` therefore never re-enables web access once API availability wins.
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         if await self.apiStrategy.isAvailable(context) {
-            let apiResult = try await self.apiStrategy.fetch(context)
-            guard context.includeOptionalUsage,
-                  await self.webStrategy.isAvailable(context)
-            else { return apiResult }
-
-            do {
-                let walletResult = try await self.webStrategy.fetch(context)
-                return Self.merging(walletResult: walletResult, into: apiResult)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                // Billing-page enrichment is optional. A valid bearer spend result remains authoritative when it fails.
-                return apiResult
-            }
+            return try await self.apiStrategy.fetch(context)
         }
         return try await self.webStrategy.fetch(context)
     }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {
         false
-    }
-
-    private static func merging(
-        walletResult: ProviderFetchResult,
-        into apiResult: ProviderFetchResult) -> ProviderFetchResult
-    {
-        guard let balance = walletResult.usage.providerCost?.balance,
-              let apiCost = apiResult.usage.providerCost
-        else { return apiResult }
-        let usage = apiResult.usage.withProviderCost(apiCost.replacing(balance: balance))
-        return apiResult.withUsage(usage)
-    }
-}
-
-extension UsageSnapshot {
-    fileprivate func withProviderCost(_ providerCost: ProviderCostSnapshot?) -> UsageSnapshot {
-        UsageSnapshot(
-            primary: self.primary,
-            secondary: self.secondary,
-            tertiary: self.tertiary,
-            extraRateWindows: self.extraRateWindows,
-            providerCost: providerCost,
-            costUsage: self.costUsage,
-            details: self.details,
-            deepseekDetailedUsageState: self.deepseekDetailedUsageState,
-            deepseekPlatformProfiles: self.deepseekPlatformProfiles,
-            opencodegoUsage: self.opencodegoUsage,
-            openAIAPIUsage: self.openAIAPIUsage,
-            codexResetCredits: self.codexResetCredits,
-            mistralUsage: self.mistralUsage,
-            commandCodeSubscriptionEnrichmentUnavailable: self.commandCodeSubscriptionEnrichmentUnavailable,
-            commandCodeHasSubscriptionPlan: self.commandCodeHasSubscriptionPlan,
-            commandCodeMonthlyGrantDepleted: self.commandCodeMonthlyGrantDepleted,
-            subscriptionExpiresAt: self.subscriptionExpiresAt,
-            subscriptionRenewsAt: self.subscriptionRenewsAt,
-            updatedAt: self.updatedAt,
-            identity: self.identity,
-            dataConfidence: self.dataConfidence)
-    }
-}
-
-extension ProviderFetchResult {
-    fileprivate func withUsage(_ usage: UsageSnapshot) -> ProviderFetchResult {
-        ProviderFetchResult(
-            usage: usage,
-            credits: self.credits,
-            dashboard: self.dashboard,
-            sourceLabel: self.sourceLabel,
-            strategyID: self.strategyID,
-            strategyKind: self.strategyKind,
-            codexResetCreditsAttempted: self.codexResetCreditsAttempted,
-            codexMonthlyLimitEnrichmentFailed: self.codexMonthlyLimitEnrichmentFailed,
-            diagnostic: self.diagnostic,
-            claudeOAuthKeychainPersistentRefHash: self.claudeOAuthKeychainPersistentRefHash,
-            claudeOAuthHistoryOwnerIdentifier: self.claudeOAuthHistoryOwnerIdentifier,
-            claudeOAuthCredentialOwner: self.claudeOAuthCredentialOwner,
-            claudeOAuthKeychainCredentialMismatch: self.claudeOAuthKeychainCredentialMismatch,
-            claudeOAuthKeychainCredentialAbsent: self.claudeOAuthKeychainCredentialAbsent,
-            claudeOAuthKeychainCredentialUnavailable: self.claudeOAuthKeychainCredentialUnavailable)
     }
 }
