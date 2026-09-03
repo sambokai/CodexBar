@@ -15,7 +15,9 @@ source reports billing-period spend and category totals. The optional web source
 ## Setup
 
 1. Open **Settings -> Providers** and enable **Hugging Face**.
-2. Configure a Hugging Face user access token, or set `HF_TOKEN`, for API-reported spend.
+2. Configure a Hugging Face user access token, set `HF_TOKEN` or `HUGGING_FACE_HUB_TOKEN`, or run `hf auth login`
+   for API-reported spend. File-based CLI credentials follow `HF_TOKEN_PATH`, `HF_HOME/token`,
+   `XDG_CACHE_HOME/huggingface/token`, and then `~/.cache/huggingface/token`.
 3. To show the prepaid wallet, leave **Cookie source** on **Automatic** after signing in to Hugging Face in a
    supported browser, or select **Manual** and paste a full `Cookie:` header from `huggingface.co/settings/billing`.
 4. Select **Off** to disable billing-page cookie access while retaining the API source.
@@ -26,8 +28,13 @@ Keychain access. Use **Open Hugging Face Billing** from Settings when a fresh au
 
 ## Data sources
 
+For a fine-grained token, Hugging Face may require the **Billing read** permission for the personal billing usage
+endpoint. Invalid or expired tokens and transient rate limits are reported with provider-specific diagnostics.
+
 - `GET https://huggingface.co/api/settings/billing/usage` with the bearer token reports billing-period spend and
   category totals. This is not the prepaid wallet.
+- `GET https://huggingface.co/api/whoami-v2` supplies optional account identity and PRO-plan detail. It is cached
+  in memory for 12 hours per token; billing spend is fetched on every refresh and remains authoritative.
 - `GET https://huggingface.co/settings/billing` with a normal authenticated Hugging Face web session returns HTML
   containing server-rendered `div[data-props]` data. CodexBar reads the personal entity's `currentBalanceUsd` value as
   the prepaid wallet.
