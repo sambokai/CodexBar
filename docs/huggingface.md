@@ -24,7 +24,9 @@ source reports billing-period spend and category totals. The optional web source
 
 The web source can show a balance without an API token. Automatic cookie import is limited to `huggingface.co` and
 uses CodexBar's shared cached-cookie/browser-import path. Ordinary refresh does not open a browser or prompt for
-Keychain access. Use **Open Hugging Face Billing** from Settings when a fresh authenticated session is needed.
+Keychain access. Use **Open Hugging Face Billing** from Settings when a fresh authenticated session is needed. When an
+API token is configured, ordinary Auto refresh reports API billing only; use the Cookie source **Refresh** action to
+explicitly re-import and validate a browser wallet.
 
 ## Data sources
 
@@ -45,17 +47,22 @@ non-negative, JavaScript-safe integer and converts it from cents exactly once. I
 `includedNanoUsd`, `usedNanoUsd`, `limitNanoUsd`, plan entitlements, or reported spend to derive a wallet balance.
 
 Hugging Face does not currently expose a verified shared account identifier across the bearer-token and browser-session
-paths. Separately configured API and browser-session credentials are therefore expected to belong to the same Hugging
-Face account; CodexBar does not invent or compare an identifier from unverified billing-page fields.
+paths. CodexBar therefore never composes those paths into one snapshot: an independently authenticated browser wallet is
+never attached to an API billing snapshot, and CodexBar does not invent or compare an identifier from unverified
+billing-page fields.
 
 ## Display and source modes
 
-- **Auto** fetches bearer-token spend first when an API token is available, then optionally enriches that result with the
-  browser-session wallet. A wallet failure leaves valid spend unchanged. Without an API token, Auto can return a
-  web-only wallet result when billing cookies are enabled.
+- **Auto** uses bearer-token billing whenever an API credential is available and returns that API result alone; it
+  never queries browser cookies or merges an independently authenticated wallet into the API snapshot. Optional usage
+  does not re-enable that combination. When no API credential is available, Auto can return a web-only wallet result
+  if billing cookies are enabled.
 - **API** uses the bearer-token spend path and never looks up cookies or requests the billing page.
 - **Web** requests only the billing page and returns a balance-only snapshot. It does not request bearer spend or attach
   an account identity from the billing entity.
+- **Cookie source Refresh** is an explicit browser-session validation action. Even when an API token is configured, it
+  imports and validates the browser wallet through the Web source alone. It does not imply that ordinary Auto refreshes
+  merge wallet data into API billing; ordinary Auto with an API credential remains API-only.
 
 The provider Balance layout token and the provider balance row show the reported prepaid wallet. Hugging Face
 Inference usage remaining and billing-period spend are separate concepts and are never substituted for Credits.
@@ -69,8 +76,11 @@ and paste a full `Cookie:` header for `huggingface.co`.
 
 ### The wallet is missing but spend is shown
 
-The billing-page enrichment is optional. A missing/expired session, login redirect, non-HTML response, or malformed
-server-rendered payload leaves the wallet unavailable and keeps valid API spend visible.
+With an API credential configured, Auto reports API billing alone and never merges a browser wallet, so the Credits
+wallet is absent from an API-mode or API-preferred Auto snapshot by design. Use **Web** mode, or use the Cookie source
+**Refresh** action after signing in to Hugging Face in the browser, to validate and show the prepaid wallet. A
+missing/expired session, login redirect, non-HTML response, or malformed server-rendered payload makes a Web refresh
+fail and keeps the previous cached cookie.
 
 ### The wallet shows `$0.00`
 

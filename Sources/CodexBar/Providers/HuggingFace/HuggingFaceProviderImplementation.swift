@@ -121,7 +121,8 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
                     ProviderCookieRefreshAction.descriptor(
                         provider: .huggingface,
                         cookieSource: { context.settings.huggingFaceCookieSource },
-                        resultValidation: .providerCostBalance,
+                        resultValidation: .webProviderCostBalance,
+                        sourceModeOverride: .web,
                         context: context),
                 ]),
         ]
