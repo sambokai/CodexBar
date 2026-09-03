@@ -8,6 +8,7 @@ defineProvider({
 
   async fetchUsage(ctx) {
     const root = "https://huggingface.co";
+    const identityCacheTTLSeconds = 12 * 60 * 60;
 
     function parseFailure(message) {
       throw ctx.fail.parseFailure(`Could not parse Hugging Face billing data: ${message}`);
@@ -34,21 +35,56 @@ defineProvider({
       return trimmed || null;
     }
 
-    function classifyStatus(status, resource) {
+    function nonnegativeFiniteNumber(value) {
+      if (value === null || value === undefined || String(value).trim() === "") return null;
+      const parsed = Number(String(value).trim());
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+
+    function retryAfterSeconds(response) {
+      const headers = response.headers || {};
+      const rateLimit = headers.ratelimit;
+      if (typeof rateLimit === "string") {
+        for (const part of rateLimit.split(";")) {
+          const match = /^\s*t\s*=\s*(.*?)\s*$/.exec(part);
+          if (!match) continue;
+          const seconds = nonnegativeFiniteNumber(match[1]);
+          if (seconds !== null) return seconds;
+        }
+      }
+      return nonnegativeFiniteNumber(headers["retry-after"]);
+    }
+
+    function classifyStatus(status, resource, response) {
       if (status === 401) {
         if (resource === "billing") {
-          throw ctx.fail.authenticationExpired("Hugging Face rejected access to personal billing usage.");
+          throw ctx.fail.authenticationExpired(
+            "Hugging Face rejected access to personal billing usage. The token may be invalid or expired.",
+          );
         }
-        throw ctx.fail.authenticationExpired("Hugging Face rejected the user access token.");
+        throw ctx.fail.authenticationExpired(
+          "Hugging Face rejected the user access token. It may be invalid or expired.",
+        );
       }
       if (resource === "billing" && status === 403) {
-        throw ctx.fail.permissionDenied("Hugging Face denied access to personal billing usage.");
+        throw ctx.fail.permissionDenied(
+          "Hugging Face denied access to personal billing usage. A fine-grained token may require the Billing read permission.",
+        );
       }
       if (resource === "billing" && status === 404) {
         throw ctx.fail.apiFailure("Hugging Face personal billing usage was not found.");
       }
       if (status === 429) {
-        throw ctx.fail.rateLimited("Hugging Face rate limit exceeded. Usage will refresh on the next cycle.");
+        const retryAfter = retryAfterSeconds(response);
+        if (retryAfter === null) {
+          throw ctx.fail.rateLimited("Hugging Face rate limit exceeded. Usage will refresh on the next cycle.");
+        }
+        throw ctx.fail.rateLimited(
+          "Hugging Face rate limit exceeded. Retry in " +
+            ctx.format.number(retryAfter) +
+            " seconds. Usage will refresh on the next cycle.",
+          { retryAfterSeconds: retryAfter },
+        );
       }
       if (status >= 500 && status <= 599) {
         throw ctx.fail.providerUnavailable(`Hugging Face ${resource} API returned HTTP ${status}.`);
@@ -60,12 +96,40 @@ defineProvider({
 
     async function getJSON(url, resource) {
       const response = await ctx.http.get(url);
-      classifyStatus(response.status, resource);
+      classifyStatus(response.status, resource, response);
       try {
         return JSON.parse(response.bodyText);
       } catch {
         parseFailure(`${resource} response was not valid JSON`);
       }
+    }
+
+    function parseIdentity(profile) {
+      const value = object(profile, "identity response");
+      const username = requiredString(value.name, "identity.name");
+      const email = optionalString(value.email, "identity.email");
+      if (value.isPro !== undefined && value.isPro !== null && typeof value.isPro !== "boolean") {
+        parseFailure("identity.isPro must be a boolean");
+      }
+      return {
+        email: email || undefined,
+        accountID: username,
+        ...(value.isPro === true ? { loginMethod: "PRO" } : {}),
+      };
+    }
+
+    async function fetchIdentity(ctx) {
+      const token = ctx.settings.getSecret("HF_TOKEN");
+      if (typeof token !== "string" || !token.trim()) return null;
+
+      const cacheKey = "huggingface.identity:" + token;
+      const cached = ctx.cache.get(cacheKey);
+      if (cached !== undefined) return cached;
+
+      const profile = await getJSON(root + "/api/whoami-v2", "identity");
+      const identity = parseIdentity(profile);
+      ctx.cache.set(cacheKey, identity, identityCacheTTLSeconds);
+      return identity;
     }
 
     function parsePeriod(period) {
@@ -120,17 +184,10 @@ defineProvider({
       return 0;
     }
 
-    const profile = object(await getJSON(`${root}/api/whoami-v2`, "identity"), "identity response");
-    const username = requiredString(profile.name, "identity.name");
-    const email = optionalString(profile.email, "identity.email");
-    if (profile.isPro !== undefined && profile.isPro !== null && typeof profile.isPro !== "boolean") {
-      parseFailure("identity.isPro must be a boolean");
-    }
-    const isPro = profile.isPro === true;
-
     // This settings response is the selected finite billing source. Sum only the categories it returns;
     // do not infer whole-account coverage or credits from other Hugging Face billing routes.
     const billing = object(await getJSON(`${root}/api/settings/billing/usage`, "billing"), "billing response");
+    // Billing is authoritative and is intentionally fetched before optional identity enrichment.
     const period = parsePeriod(billing.period);
     const usage = object(billing.usage, "billing.usage");
     const categoryRows = [];
@@ -161,13 +218,15 @@ defineProvider({
     if (!Number.isFinite(totalUSD)) parseFailure("billing cost total overflowed");
     categoryRows.sort(compareRows);
 
+    let identity = null;
+    try {
+      identity = await fetchIdentity(ctx);
+    } catch {
+      // Billing remains useful when identity is unavailable or malformed.
+    }
+
     const periodStartLabel = period.periodStart.toISOString().slice(0, 10);
     const periodEndLabel = period.periodEnd.toISOString().slice(0, 10);
-    const identity = {
-      email: email || undefined,
-      accountID: username,
-    };
-    if (isPro) identity.loginMethod = "PRO";
 
     return {
       cost: {
@@ -184,7 +243,7 @@ defineProvider({
           rows: [
             { label: "Billing period", value: `${periodStartLabel} – ${periodEndLabel}` },
             { label: "Reported spend", value: ctx.format.usd(totalUSD) },
-            ...(isPro ? [{ label: "Plan", value: "PRO" }] : []),
+            ...(identity && identity.loginMethod === "PRO" ? [{ label: "Plan", value: "PRO" }] : []),
           ],
         },
         {
