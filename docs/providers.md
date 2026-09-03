@@ -415,8 +415,8 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 - Details: `docs/openrouter.md`.
 
 ## Hugging Face
-- API spend uses the Hugging Face user access token from `~/.codexbar/config.json` (`providers[].apiKey`) or
-  `HF_TOKEN` and remains independent of the prepaid wallet.
+- API spend uses the Hugging Face user access token from `~/.codexbar/config.json` (`providers[].apiKey`), `HF_TOKEN`,
+  `HUGGING_FACE_HUB_TOKEN`, or Hugging Face CLI token files and remains independent of the prepaid wallet.
 - Optional prepaid Credits enrichment requests `GET https://huggingface.co/settings/billing` with a normal
   authenticated Hugging Face browser session cookie. Automatic import is limited to `huggingface.co`; Manual mode
   accepts a full `Cookie:` header. The `.api` source never looks up cookies.

@@ -7,6 +7,14 @@ import Testing
 @testable import CodexBar
 @testable import CodexBarCore
 
+private struct HuggingFaceBillingHTTPCase: Sendable {
+    let status: Int
+    let expectedKind: ProviderFetchClassifiedError.Kind
+    let headers: [String: String]
+    let messageFragment: String?
+    let retryAfterSeconds: Double?
+}
+
 struct HuggingFaceUsageStatsTests {
     @Test(arguments: BundledPluginTestSupport.engines)
     func `current billing period spend and identity match the finite API payload`(
@@ -52,8 +60,8 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
         #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
         #expect(requests.map { $0.url?.path } == [
-            "/api/whoami-v2",
             "/api/settings/billing/usage",
+            "/api/whoami-v2",
         ])
         #expect(requests.allSatisfy { $0.url?.path != "/api/settings/billing/usage-v2" })
         #expect(snapshot.primary == nil)
@@ -133,17 +141,12 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
-    func `malformed plan type is classified as a parse failure`(engine: ProviderPluginEngineKind) async throws {
-        do {
-            _ = try await Self.fetch(
-                engine: engine,
-                profileBody: #"{"name":"fixture-user","isPro":"PRO"}"#)
-            Issue.record("Expected a malformed Hugging Face plan type to fail")
-        } catch let error as ProviderFetchClassifiedError {
-            #expect(error.kind == .parseFailure)
-        } catch {
-            Issue.record("Unexpected Hugging Face error: \(error)")
-        }
+    func `malformed plan type leaves billing usable without identity`(engine: ProviderPluginEngineKind) async throws {
+        let snapshot = try await Self.fetch(
+            engine: engine,
+            profileBody: #"{"name":"fixture-user","isPro":"PRO"}"#)
+        #expect(snapshot.providerCost?.used == 2.41)
+        #expect(snapshot.identity == nil)
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
@@ -210,34 +213,67 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
-    func `HTTP errors preserve the documented classifications`(engine: ProviderPluginEngineKind) async throws {
-        let cases: [(String, Int, ProviderFetchClassifiedError.Kind)] = [
-            ("identity", 401, .authenticationExpired),
-            ("identity", 503, .providerUnavailable),
-            ("billing", 401, .authenticationExpired),
-            ("billing", 403, .permissionDenied),
-            ("billing", 404, .apiFailure),
-            ("billing", 418, .apiFailure),
-            ("billing", 429, .rateLimited),
-            ("billing", 503, .providerUnavailable),
+    func `billing HTTP errors preserve classifications and diagnostics`(engine: ProviderPluginEngineKind) async throws {
+        let cases: [HuggingFaceBillingHTTPCase] = [
+            .init(
+                status: 401,
+                expectedKind: .authenticationExpired,
+                headers: [:],
+                messageFragment: "invalid or expired",
+                retryAfterSeconds: nil),
+            .init(
+                status: 403,
+                expectedKind: .permissionDenied,
+                headers: [:],
+                messageFragment: "Billing read",
+                retryAfterSeconds: nil),
+            .init(status: 404, expectedKind: .apiFailure, headers: [:], messageFragment: nil, retryAfterSeconds: nil),
+            .init(status: 418, expectedKind: .apiFailure, headers: [:], messageFragment: nil, retryAfterSeconds: nil),
+            .init(
+                status: 429,
+                expectedKind: .rateLimited,
+                headers: ["RateLimit": "\"api\";r=0;t=33"],
+                messageFragment: "33",
+                retryAfterSeconds: 10),
+            .init(
+                status: 429,
+                expectedKind: .rateLimited,
+                headers: ["Retry-After": "7.5"],
+                messageFragment: "7.5",
+                retryAfterSeconds: 7.5),
+            .init(
+                status: 429,
+                expectedKind: .rateLimited,
+                headers: ["RateLimit": "\"api\";r=0;t=not-a-number", "Retry-After": "also-invalid"],
+                messageFragment: nil,
+                retryAfterSeconds: nil),
+            .init(
+                status: 503,
+                expectedKind: .providerUnavailable,
+                headers: [:],
+                messageFragment: nil,
+                retryAfterSeconds: nil),
         ]
 
-        for (resource, status, expectedKind) in cases {
+        for testCase in cases {
+            let status = testCase.status
             do {
                 _ = try await Self.fetch(
                     engine: engine,
-                    profileBody: resource == "identity" ? #"{"error":"hf_fixture_token"}"# : Self.profileFixture,
-                    billingBody: resource == "billing" ? #"{"error":"hf_fixture_token"}"# : Self.billingFixture,
-                    profileStatus: resource == "identity" ? status : 200,
-                    billingStatus: resource == "billing" ? status : 200)
+                    billingBody: #"{"error":"hf_fixture_token"}"#,
+                    billingStatus: status,
+                    billingHeaders: testCase.headers)
                 Issue.record("Expected Hugging Face HTTP \(status) to fail")
             } catch let error as ProviderFetchClassifiedError {
-                #expect(error.kind == expectedKind)
+                #expect(error.kind == testCase.expectedKind)
                 #expect(!error.message.contains("hf_fixture_token"))
-                if resource == "billing", status == 401 {
-                    #expect(error.message.contains("personal billing usage"))
-                } else if resource == "identity", status == 401 {
-                    #expect(error.message.contains("user access token"))
+                if let messageFragment = testCase.messageFragment {
+                    #expect(error.message.contains(messageFragment))
+                }
+                if let retryAfterSeconds = testCase.retryAfterSeconds {
+                    #expect(error.retryAfterSeconds == retryAfterSeconds)
+                } else if status == 429 {
+                    #expect(error.retryAfterSeconds == nil)
                 }
             } catch {
                 Issue.record("Unexpected Hugging Face HTTP error: \(error)")
@@ -255,8 +291,8 @@ struct HuggingFaceUsageStatsTests {
 
         #expect(requests.count == 2)
         #expect(requests.map { $0.url?.path } == [
-            "/api/whoami-v2",
             "/api/settings/billing/usage",
+            "/api/whoami-v2",
         ])
         for request in requests {
             let url = try #require(request.url)
@@ -279,7 +315,7 @@ struct HuggingFaceUsageStatsTests {
         let transport = Self.transport(profileBody: #"{"name":"fixture/user?x","email":"fixture@example.com"}"#)
         _ = try await Self.fetch(engine: engine, transport: transport)
         let requests = await transport.requests()
-        let billingRequest = try #require(requests.last)
+        let billingRequest = try #require(requests.first { $0.url?.path == "/api/settings/billing/usage" })
         #expect(billingRequest.url?.path == "/api/settings/billing/usage")
         #expect(billingRequest.url?.absoluteString.contains("fixture") == false)
     }
@@ -289,9 +325,11 @@ struct HuggingFaceUsageStatsTests {
         #expect(HuggingFaceSettingsReader.token(environment: [
             HuggingFaceSettingsReader.tokenEnvironmentKey: "  'hf_fixture_token'  ",
         ]) == "hf_fixture_token")
-        #expect(HuggingFaceSettingsReader.token(environment: [
-            HuggingFaceSettingsReader.tokenEnvironmentKey: "  \"  \" ",
-        ]) == nil)
+        let isolatedHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HuggingFaceUsageStatsTests-no-token-\(UUID().uuidString)")
+        #expect(HuggingFaceSettingsReader.token(
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "  \"  \" "],
+            homeDirectory: isolatedHome) == nil)
 
         let descriptor = ProviderDescriptorRegistry.descriptor(for: .huggingface)
         #expect(descriptor.metadata.displayName == "Hugging Face")
@@ -702,53 +740,6 @@ struct HuggingFaceUsageStatsTests {
         }
     }
 
-    private static func fetch(
-        engine: ProviderPluginEngineKind,
-        transport: ProviderHTTPTransportStub? = nil,
-        profileBody: String = Self.profileFixture,
-        billingBody: String = Self.billingFixture,
-        profileStatus: Int = 200,
-        billingStatus: Int = 200) async throws -> UsageSnapshot
-    {
-        let transport = transport ?? Self.transport(
-            profileBody: profileBody,
-            billingBody: billingBody,
-            profileStatus: profileStatus,
-            billingStatus: billingStatus)
-        let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
-        return try await runtime.fetchUsage(
-            secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-            now: Date(timeIntervalSince1970: 1_777_000_000))
-    }
-
-    private static func transport(
-        profileBody: String = Self.profileFixture,
-        billingBody: String = Self.billingFixture,
-        profileStatus: Int = 200,
-        billingStatus: Int = 200) -> ProviderHTTPTransportStub
-    {
-        ProviderHTTPTransportStub { request in
-            let url = try #require(request.url)
-            switch url.path {
-            case "/api/whoami-v2":
-                return try Self.response(url: url, body: profileBody, statusCode: profileStatus)
-            case "/api/settings/billing/usage":
-                return try Self.response(url: url, body: billingBody, statusCode: billingStatus)
-            default:
-                throw ProviderPluginError.script("Unexpected Hugging Face fixture path: \(url.path)")
-            }
-        }
-    }
-
-    private static func response(url: URL, body: String, statusCode: Int) throws -> (Data, URLResponse) {
-        let response = try #require(HTTPURLResponse(
-            url: url,
-            statusCode: statusCode,
-            httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]))
-        return (Data(body.utf8), response)
-    }
-
     private static func fetchContext(
         sourceMode: ProviderSourceMode = .api,
         environment: [String: String] = [:],
@@ -887,6 +878,236 @@ struct HuggingFaceUsageStatsTests {
     """#
 
     private static let billingFixture = Self.billingBody()
+}
+
+extension HuggingFaceUsageStatsTests {
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `identity failures leave a valid billing snapshot available`(engine: ProviderPluginEngineKind) async throws {
+        let cases = [
+            (profileBody: #"{"error":"hf_fixture_token"}"#, profileStatus: 401),
+            (profileBody: #"{"error":"hf_fixture_token"}"#, profileStatus: 503),
+            (profileBody: #"{"name":123}"#, profileStatus: 200),
+        ]
+
+        for (profileBody, profileStatus) in cases {
+            let snapshot = try await Self.fetch(
+                engine: engine,
+                profileBody: profileBody,
+                profileStatus: profileStatus)
+            #expect(snapshot.providerCost?.used == 2.41)
+            #expect(snapshot.identity == nil)
+            #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `billing refreshes on every fetch while identity is cached`(engine: ProviderPluginEngineKind) async throws {
+        let transport = Self.transport()
+        let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
+        let secrets = [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"]
+
+        _ = try await runtime.fetchUsage(
+            secrets: secrets,
+            now: Date(timeIntervalSince1970: 1_777_000_000))
+        let second = try await runtime.fetchUsage(
+            secrets: secrets,
+            now: Date(timeIntervalSince1970: 1_777_000_001))
+        let requests = await transport.requests()
+
+        #expect(second.identity?.accountID == "fixture-user")
+        #expect(requests.map { $0.url?.path } == [
+            "/api/settings/billing/usage",
+            "/api/whoami-v2",
+            "/api/settings/billing/usage",
+        ])
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `identity cache is isolated when the bearer token changes`(engine: ProviderPluginEngineKind) async throws {
+        let transport = Self.transport()
+        let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
+
+        _ = try await runtime.fetchUsage(
+            secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_first_token"],
+            now: Date(timeIntervalSince1970: 1_777_000_000))
+        _ = try await runtime.fetchUsage(
+            secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_second_token"],
+            now: Date(timeIntervalSince1970: 1_777_000_001))
+        let requests = await transport.requests()
+
+        #expect(requests.map { $0.url?.path } == [
+            "/api/settings/billing/usage",
+            "/api/whoami-v2",
+            "/api/settings/billing/usage",
+            "/api/whoami-v2",
+        ])
+        #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
+            "Bearer hf_first_token",
+            "Bearer hf_first_token",
+            "Bearer hf_second_token",
+            "Bearer hf_second_token",
+        ])
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `failed identity refreshes are not cached`(engine: ProviderPluginEngineKind) async throws {
+        let transports = [
+            Self.transport(profileStatus: 503),
+            Self.transport(profileBody: #"{"name":123}"#),
+        ]
+        let secrets = [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"]
+
+        for transport in transports {
+            let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
+            for _ in 0..<2 {
+                let snapshot = try await runtime.fetchUsage(
+                    secrets: secrets,
+                    now: Date(timeIntervalSince1970: 1_777_000_000))
+                #expect(snapshot.providerCost?.used == 2.41)
+                #expect(snapshot.identity == nil)
+            }
+            let requests = await transport.requests()
+            #expect(requests.count(where: { $0.url?.path == "/api/settings/billing/usage" }) == 2)
+            #expect(requests.count(where: { $0.url?.path == "/api/whoami-v2" }) == 2)
+        }
+    }
+
+    @Test(arguments: BundledPluginTestSupport.engines)
+    func `billing remains authoritative when a cached identity exists`(engine: ProviderPluginEngineKind) async throws {
+        let statuses = HuggingFaceHTTPStatusSequence([200, 401])
+        let transport = ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            switch url.path {
+            case "/api/settings/billing/usage":
+                let status = await statuses.next()
+                return try Self.response(
+                    url: url,
+                    body: status == 200 ? Self.billingFixture : #"{"error":"hf_fixture_token"}"#,
+                    statusCode: status)
+            case "/api/whoami-v2":
+                return try Self.response(url: url, body: Self.profileFixture, statusCode: 200)
+            default:
+                throw ProviderPluginError.script("Unexpected Hugging Face fixture path: \(url.path)")
+            }
+        }
+        let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
+        let secrets = [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"]
+
+        _ = try await runtime.fetchUsage(
+            secrets: secrets,
+            now: Date(timeIntervalSince1970: 1_777_000_000))
+        do {
+            _ = try await runtime.fetchUsage(
+                secrets: secrets,
+                now: Date(timeIntervalSince1970: 1_777_000_001))
+            Issue.record("Expected the second billing request to fail")
+        } catch let error as ProviderFetchClassifiedError {
+            #expect(error.kind == .authenticationExpired)
+            #expect(error.message.contains("personal billing usage"))
+        }
+        let requests = await transport.requests()
+        #expect(requests.map { $0.url?.path } == [
+            "/api/settings/billing/usage",
+            "/api/whoami-v2",
+            "/api/settings/billing/usage",
+        ])
+    }
+
+    @Test
+    func `descriptor reuses the API strategy across pipeline resolutions`() async throws {
+        let descriptor = ProviderDescriptorRegistry.descriptor(for: .huggingface)
+        let context = Self.fetchContext(
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"])
+        let first = try #require(
+            await descriptor.fetchPlan.pipeline.resolveStrategies(context).first as? ScriptFetchStrategy)
+        let second = try #require(
+            await descriptor.fetchPlan.pipeline.resolveStrategies(context).first as? ScriptFetchStrategy)
+
+        #expect(first === second)
+    }
+
+    private static func fetch(
+        engine: ProviderPluginEngineKind,
+        transport: ProviderHTTPTransportStub? = nil,
+        profileBody: String = Self.profileFixture,
+        billingBody: String = Self.billingFixture,
+        profileStatus: Int = 200,
+        billingStatus: Int = 200,
+        profileHeaders: [String: String] = [:],
+        billingHeaders: [String: String] = [:]) async throws -> UsageSnapshot
+    {
+        let transport = transport ?? Self.transport(
+            profileBody: profileBody,
+            billingBody: billingBody,
+            profileStatus: profileStatus,
+            billingStatus: billingStatus,
+            profileHeaders: profileHeaders,
+            billingHeaders: billingHeaders)
+        let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
+        return try await runtime.fetchUsage(
+            secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            now: Date(timeIntervalSince1970: 1_777_000_000))
+    }
+
+    private static func transport(
+        profileBody: String = Self.profileFixture,
+        billingBody: String = Self.billingFixture,
+        profileStatus: Int = 200,
+        billingStatus: Int = 200,
+        profileHeaders: [String: String] = [:],
+        billingHeaders: [String: String] = [:]) -> ProviderHTTPTransportStub
+    {
+        ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            switch url.path {
+            case "/api/whoami-v2":
+                return try Self.response(
+                    url: url,
+                    body: profileBody,
+                    statusCode: profileStatus,
+                    headers: profileHeaders)
+            case "/api/settings/billing/usage":
+                return try Self.response(
+                    url: url,
+                    body: billingBody,
+                    statusCode: billingStatus,
+                    headers: billingHeaders)
+            default:
+                throw ProviderPluginError.script("Unexpected Hugging Face fixture path: \(url.path)")
+            }
+        }
+    }
+
+    private static func response(
+        url: URL,
+        body: String,
+        statusCode: Int,
+        headers: [String: String] = [:]) throws -> (Data, URLResponse)
+    {
+        var headerFields = headers
+        headerFields["Content-Type"] = "application/json"
+        let response = try #require(HTTPURLResponse(
+            url: url,
+            statusCode: statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: headerFields))
+        return (Data(body.utf8), response)
+    }
+}
+
+private actor HuggingFaceHTTPStatusSequence {
+    private var statuses: [Int]
+
+    init(_ statuses: [Int]) {
+        self.statuses = statuses
+    }
+
+    func next() -> Int {
+        if self.statuses.count > 1 {
+            return self.statuses.removeFirst()
+        }
+        return self.statuses.first ?? 200
+    }
 }
 
 @MainActor
