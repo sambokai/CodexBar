@@ -541,7 +541,7 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test
-    func `auto merges wallet into API spend without changing API-owned fields`() async throws {
+    func `auto with API keeps the API snapshot authoritative when a browser wallet is available`() async throws {
         let recorder = HuggingFaceCookieResolutionRecorder()
         let apiTransport = Self.transport()
         let webTransport = Self.walletTransport(balance: 9.25)
@@ -561,21 +561,49 @@ struct HuggingFaceUsageStatsTests {
         #expect(result.strategyID == "huggingface.js")
         #expect(result.sourceLabel == "api")
         #expect(result.usage.providerCost?.used == 2.41)
-        #expect(result.usage.providerCost?.balance == 9.25)
+        #expect(result.usage.providerCost?.balance == nil)
         #expect(result.usage.providerCost?.period == "Reported billing period")
         #expect(result.usage.providerCost?.resetsAt == Self.date("2026-09-01T00:00:00Z"))
         #expect(result.usage.identity?.accountID == "fixture-user")
+        #expect(result.usage.identity?.accountEmail == "fixture@example.com")
         #expect(result.usage.details.count == 2)
         #expect(result.usage.dataConfidence == .exact)
-        #expect(await recorder.count == 1)
+        #expect(await recorder.count == .zero)
         #expect(await apiTransport.requests().count == 2)
-        #expect(await webTransport.requests().count == 1)
+        #expect(await webTransport.requests().isEmpty)
     }
 
     @Test
-    func `auto leaves the optional wallet untouched when enrichment is disabled`() async throws {
+    func `auto with API never consults the browser wallet for either optional usage preference`() async throws {
+        for includeOptionalUsage in [false, true] {
+            let recorder = HuggingFaceCookieResolutionRecorder()
+            let webTransport = Self.walletTransport(balance: 9.25)
+            let auto = HuggingFaceAutoFetchStrategy(
+                apiStrategy: Self.apiStrategy(transport: Self.transport()),
+                webStrategy: HuggingFaceWebFetchStrategy(
+                    transport: webTransport,
+                    resolveCookieHeader: { _ in
+                        await recorder.record()
+                        return "session=fixture"
+                    }))
+            let result = try await auto.fetch(Self.fetchContext(
+                sourceMode: .auto,
+                environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+                settings: Self.manualCookieSettings(),
+                includeOptionalUsage: includeOptionalUsage))
+
+            #expect(result.usage.providerCost?.used == 2.41)
+            #expect(result.usage.providerCost?.balance == nil)
+            #expect(result.usage.identity?.accountID == "fixture-user")
+            #expect(await recorder.count == .zero)
+            #expect(await webTransport.requests().isEmpty)
+        }
+    }
+
+    @Test
+    func `auto with API keeps an unchanged API snapshot instead of adopting a wallet balance`() async throws {
         let recorder = HuggingFaceCookieResolutionRecorder()
-        let webTransport = Self.walletTransport(balance: 9.25)
+        let webTransport = Self.walletTransport(balance: 0)
         let auto = HuggingFaceAutoFetchStrategy(
             apiStrategy: Self.apiStrategy(transport: Self.transport()),
             webStrategy: HuggingFaceWebFetchStrategy(
@@ -587,8 +615,7 @@ struct HuggingFaceUsageStatsTests {
         let result = try await auto.fetch(Self.fetchContext(
             sourceMode: .auto,
             environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-            settings: Self.manualCookieSettings(),
-            includeOptionalUsage: false))
+            settings: Self.manualCookieSettings()))
 
         #expect(result.usage.providerCost?.used == 2.41)
         #expect(result.usage.providerCost?.balance == nil)
@@ -597,65 +624,34 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test
-    func `auto preserves API spend when wallet enrichment is unavailable`() async throws {
-        let webTransport = ProviderHTTPTransportStub { request in
-            let url = try #require(request.url)
-            return try Self.htmlResponse(url: url, body: "<html>signed out</html>", statusCode: 403)
+    func `auto with API does not fall back to web when the API fetch fails`() async throws {
+        let recorder = HuggingFaceCookieResolutionRecorder()
+        let webTransport = Self.walletTransport(balance: 7.5)
+        let failingAPI = ProviderHTTPTransportStub { _ in
+            throw ProviderPluginError.script("fixture API outage")
         }
         let auto = HuggingFaceAutoFetchStrategy(
-            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            apiStrategy: Self.apiStrategy(transport: failingAPI),
             webStrategy: HuggingFaceWebFetchStrategy(
                 transport: webTransport,
-                resolveCookieHeader: { _ in "session=fixture" }))
-        let result = try await auto.fetch(Self.fetchContext(
+                resolveCookieHeader: { _ in
+                    await recorder.record()
+                    return "session=fixture"
+                }))
+        let context = Self.fetchContext(
             sourceMode: .auto,
             environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-            settings: Self.manualCookieSettings()))
+            settings: Self.manualCookieSettings())
 
-        #expect(result.usage.providerCost?.used == 2.41)
-        #expect(result.usage.providerCost?.balance == nil)
-        #expect(result.usage.identity?.accountID == "fixture-user")
-        #expect(result.usage.details.count == 2)
-    }
-
-    @Test
-    func `auto preserves API spend when wallet is malformed`() async throws {
-        let webTransport = ProviderHTTPTransportStub { request in
-            let url = try #require(request.url)
-            return try Self.htmlResponse(
-                url: url,
-                body: Self.dataProps(#"{"entity":{"type":"user","currentBalanceUsd":"9.25"}}"#),
-                statusCode: 200)
+        #expect(await auto.isAvailable(context))
+        do {
+            _ = try await auto.fetch(context)
+            Issue.record("Expected the available API strategy failure to propagate")
+        } catch {
+            #expect(!(error is CancellationError))
         }
-        let auto = HuggingFaceAutoFetchStrategy(
-            apiStrategy: Self.apiStrategy(transport: Self.transport()),
-            webStrategy: HuggingFaceWebFetchStrategy(
-                transport: webTransport,
-                resolveCookieHeader: { _ in "session=fixture" }))
-        let result = try await auto.fetch(Self.fetchContext(
-            sourceMode: .auto,
-            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-            settings: Self.manualCookieSettings()))
-
-        #expect(result.usage.providerCost?.used == 2.41)
-        #expect(result.usage.providerCost?.balance == nil)
-        #expect(result.usage.identity?.accountID == "fixture-user")
-    }
-
-    @Test
-    func `auto merges a known zero wallet instead of treating it as unavailable`() async throws {
-        let auto = HuggingFaceAutoFetchStrategy(
-            apiStrategy: Self.apiStrategy(transport: Self.transport()),
-            webStrategy: HuggingFaceWebFetchStrategy(
-                transport: Self.walletTransport(balance: 0),
-                resolveCookieHeader: { _ in "session=fixture" }))
-        let result = try await auto.fetch(Self.fetchContext(
-            sourceMode: .auto,
-            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
-            settings: Self.manualCookieSettings()))
-
-        #expect(result.usage.providerCost?.used == 2.41)
-        #expect(result.usage.providerCost?.balance == 0)
+        #expect(await recorder.count == .zero)
+        #expect(await webTransport.requests().isEmpty)
     }
 
     @Test
