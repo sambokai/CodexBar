@@ -147,7 +147,8 @@ extension UsageStore {
     func refreshProvider(
         _ provider: UsageProvider,
         allowDisabled: Bool = false,
-        coalesceIfRefreshing: Bool = false) async
+        coalesceIfRefreshing: Bool = false,
+        sourceModeOverride: ProviderSourceMode? = nil) async
     {
         // Codex source reconciliation can persist a settings correction. Perform it before
         // capturing the publication revision so the request cannot invalidate itself.
@@ -198,11 +199,13 @@ extension UsageStore {
                     allowDisabled: allowDisabled)
                 snapshotUpdatedAtBeforeRefresh = self.snapshot(for: provider.instanceID)?.updatedAt
                 didStartRefresh = true
-                await ProviderRefreshRequestContext.withNewRequest {
-                    await self.refreshProviderTracked(
-                        provider,
-                        allowDisabled: allowDisabled,
-                        generation: request.generation)
+                await Self.$requestedSourceModeOverride.withValue(sourceModeOverride) {
+                    await ProviderRefreshRequestContext.withNewRequest {
+                        await self.refreshProviderTracked(
+                            provider,
+                            allowDisabled: allowDisabled,
+                            generation: request.generation)
+                    }
                 }
             }
             let publishedNewSnapshot = didStartRefresh &&
@@ -396,6 +399,7 @@ extension UsageStore {
             provider: provider,
             override: nil,
             claudeOwnerCLIRecoveryOnly: retryMode == .claudeOwnerCLIRecovery)
+        await self._test_refreshFetchContextObserver?(provider, fetchContext)
         let claudeHasAdminAPIKey = ClaudeAdminAPISettingsReader.apiKey(environment: fetchContext.env) != nil
         let claudeActiveAccountIdentitySourceEligible = Self.shouldTrackClaudeActiveAccountIdentity(
             provider: provider,
