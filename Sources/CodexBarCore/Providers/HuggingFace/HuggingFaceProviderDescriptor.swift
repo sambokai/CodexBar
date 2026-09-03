@@ -86,17 +86,17 @@ public enum HuggingFaceProviderDescriptor {
     }
 
     private static func fetchPlan() -> ProviderFetchPlan {
-        ProviderFetchPlan(
+        let api = self.apiStrategy()
+        return ProviderFetchPlan(
             sourceModes: [.auto, .api, .web],
             pipeline: ProviderFetchPipeline(resolveStrategies: { context in
-                let api = self.apiStrategy()
                 switch context.sourceMode {
                 case .api, .cli, .oauth:
-                    return [api]
+                    [api]
                 case .web:
-                    return [HuggingFaceWebFetchStrategy()]
+                    [HuggingFaceWebFetchStrategy()]
                 case .auto:
-                    return [HuggingFaceAutoFetchStrategy(
+                    [HuggingFaceAutoFetchStrategy(
                         apiStrategy: api,
                         webStrategy: HuggingFaceWebFetchStrategy())]
                 }
