@@ -1,7 +1,18 @@
 import Foundation
+import SweetCookieKit
 
 public enum HuggingFaceProviderDescriptor {
     public static let descriptor: ProviderDescriptor = Self.makeDescriptor()
+
+    /// Hugging Face sessions are imported from Chrome; avoid probing unrelated browser keychains.
+    private static var browserCookieOrder: BrowserCookieImportOrder? {
+        #if os(macOS)
+        [.chrome]
+        #else
+        nil
+        #endif
+    }
+
     private static let credentials = ProviderCredentialAdapter.apiKey(
         environmentKey: HuggingFaceSettingsReader.tokenEnvironmentKey,
         apiKeyDebugLabel: HuggingFaceSettingsReader.tokenEnvironmentKey,
@@ -38,6 +49,7 @@ public enum HuggingFaceProviderDescriptor {
                 widgetSelectable: false,
                 isPrimaryProvider: false,
                 usesAccountFallback: false,
+                browserCookieOrder: self.browserCookieOrder,
                 dashboardURL: "https://huggingface.co/settings/billing",
                 statusPageURL: nil,
                 statusLinkURL: nil),
