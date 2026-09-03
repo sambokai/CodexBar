@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 public struct HuggingFaceWebCreditsSnapshot: Equatable, Sendable {
