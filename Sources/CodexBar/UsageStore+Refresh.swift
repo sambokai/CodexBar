@@ -696,7 +696,10 @@ extension UsageStore {
         if context.tokenAccount != nil, currentTokenAccount == nil {
             return
         }
-        let accountScoped = if let tokenAccount = currentTokenAccount {
+        // Hugging Face's browser-session wallet has no identifier that can be correlated with an API
+        // token account. Never relabel or cache it as though it belonged to the selected token account.
+        let isHuggingFaceWebWallet = provider == .huggingface && result.strategyKind == .web
+        let accountScoped = if let tokenAccount = currentTokenAccount, !isHuggingFaceWebWallet {
             self.applyAccountLabel(scoped, provider: provider, account: tokenAccount)
         } else {
             scoped
@@ -769,7 +772,7 @@ extension UsageStore {
             self.lastSourceLabels[provider.instanceID] = result.sourceLabel
             self.recordProviderFetchSuccessErrorState(provider: provider)
             self.diagnostics[provider.instanceID] = result.diagnostic
-            if let tokenAccount = currentTokenAccount {
+            if let tokenAccount = currentTokenAccount, !isHuggingFaceWebWallet {
                 self.cacheTokenAccountSnapshot(
                     provider: provider,
                     account: tokenAccount,
