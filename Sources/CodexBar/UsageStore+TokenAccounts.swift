@@ -944,7 +944,7 @@ extension UsageStore {
             provider: provider,
             settings: self.settings,
             override: override)
-        let sourceMode = ProviderRegistry.resolvedSourceMode(
+        let sourceMode = Self.requestedSourceModeOverride ?? ProviderRegistry.resolvedSourceMode(
             provider: provider,
             settings: self.settings,
             account: account)

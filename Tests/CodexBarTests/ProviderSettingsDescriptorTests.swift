@@ -201,28 +201,146 @@ struct ProviderSettingsDescriptorTests {
     }
 
     @Test
-    func `hugging face cookie refresh forces optional enrichment and accepts API primary result`() async throws {
-        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-huggingface-refresh")
+    func `hugging face cookie refresh requests the web source and commits the imported wallet`() async throws {
+        let fixture = try self.makeSettingsFixture(
+            suite: "ProviderSettingsDescriptorTests-huggingface-refresh",
+            environmentBase: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"])
         fixture.settings.huggingFaceCookieSource = .auto
         fixture.settings.showOptionalCreditsAndExtraUsage = false
         let context = fixture.settingsContext(provider: .huggingface)
         let picker = try #require(HuggingFaceProviderImplementation().settingsPickers(context: context).first)
         let action = try #require(picker.trailingActions.first)
         let service = "com.steipete.codexbar.tests.settings-cookie-refresh.\(UUID().uuidString)"
-        var observedIncludeOptionalUsage = false
+        var observedSourceModes: [ProviderSourceMode] = []
 
         await KeychainCacheStore.withServiceOverrideForTesting(service) {
             await KeychainCacheStore.withImplicitTestStoreForTesting {
-                fixture.store._test_providerRefreshOverride = { provider in
-                    observedIncludeOptionalUsage = fixture.store.makeFetchContext(
-                        provider: provider,
-                        override: nil).includeOptionalUsage
+                CookieHeaderCache.store(
+                    provider: .huggingface,
+                    cookieHeader: "old-test-cookie",
+                    sourceLabel: "Test old")
+                fixture.store._test_refreshFetchContextObserver = { _, fetchContext in
+                    observedSourceModes.append(fetchContext.sourceMode)
+                }
+                fixture.store._test_providerFetchOutcomeOverride = { provider in
                     CookieHeaderCache.store(
                         provider: provider,
                         cookieHeader: "new-test-cookie",
                         sourceLabel: "Test new")
                     let now = Date()
-                    fixture.store.snapshots[provider.instanceID] = UsageSnapshot(
+                    let usage = UsageSnapshot(
+                        primary: nil,
+                        secondary: nil,
+                        providerCost: ProviderCostSnapshot(
+                            used: 0,
+                            limit: 0,
+                            currencyCode: "USD",
+                            period: "Prepaid credits",
+                            balance: 7.5,
+                            updatedAt: now),
+                        updatedAt: now)
+                    return ProviderFetchOutcome(
+                        result: .success(ProviderFetchResult(
+                            usage: usage,
+                            credits: nil,
+                            dashboard: nil,
+                            sourceLabel: "web",
+                            strategyID: "huggingface.web",
+                            strategyKind: .web)),
+                        attempts: [])
+                }
+                defer {
+                    fixture.store._test_refreshFetchContextObserver = nil
+                    fixture.store._test_providerFetchOutcomeOverride = nil
+                }
+
+                await action.perform()
+
+                #expect(observedSourceModes == [.web])
+                #expect(fixture.settings.showOptionalCreditsAndExtraUsage == false)
+                #expect(fixture.store.lastSourceLabels[.huggingface] == "web")
+                #expect(fixture.store.snapshot(for: UsageProvider.huggingface.instanceID)?.providerCost?.balance == 7.5)
+                #expect(CookieHeaderCache.load(provider: .huggingface)?.cookieHeader == "new-test-cookie")
+                #expect(picker.trailingText?()?.contains("Test new") == true)
+            }
+        }
+    }
+
+    @Test
+    func `hugging face ordinary auto refresh with API stays auto and does not request the web override`() async throws {
+        let fixture = try self.makeSettingsFixture(
+            suite: "ProviderSettingsDescriptorTests-huggingface-auto-refresh",
+            environmentBase: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"])
+        fixture.settings.huggingFaceCookieSource = .auto
+        let context = fixture.settingsContext(provider: .huggingface)
+        var observedSourceModes: [ProviderSourceMode] = []
+
+        fixture.store._test_refreshFetchContextObserver = { _, fetchContext in
+            observedSourceModes.append(fetchContext.sourceMode)
+        }
+        fixture.store._test_providerFetchOutcomeOverride = { _ in
+            let now = Date()
+            let usage = UsageSnapshot(
+                primary: nil,
+                secondary: nil,
+                providerCost: ProviderCostSnapshot(
+                    used: 2.41,
+                    limit: 0,
+                    currencyCode: "USD",
+                    period: "Reported billing period",
+                    updatedAt: now),
+                updatedAt: now)
+            return ProviderFetchOutcome(
+                result: .success(ProviderFetchResult(
+                    usage: usage,
+                    credits: nil,
+                    dashboard: nil,
+                    sourceLabel: "api",
+                    strategyID: "huggingface.js",
+                    strategyKind: .apiToken)),
+                attempts: [])
+        }
+        defer {
+            fixture.store._test_refreshFetchContextObserver = nil
+            fixture.store._test_providerFetchOutcomeOverride = nil
+        }
+
+        await fixture.store.refreshProvider(.huggingface, allowDisabled: true)
+
+        #expect(observedSourceModes == [.auto])
+        #expect(fixture.store.lastSourceLabels[.huggingface] == "api")
+        #expect(fixture.store.snapshot(for: UsageProvider.huggingface.instanceID)?.providerCost?.used == 2.41)
+        #expect(fixture.store.snapshot(for: UsageProvider.huggingface.instanceID)?.providerCost?.balance == nil)
+    }
+
+    @Test
+    func `hugging face cookie refresh rejects a non web result that carries a balance`() async throws {
+        let fixture = try self.makeSettingsFixture(
+            suite: "ProviderSettingsDescriptorTests-huggingface-refresh-non-web",
+            environmentBase: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"])
+        fixture.settings.huggingFaceCookieSource = .auto
+        let context = fixture.settingsContext(provider: .huggingface)
+        let picker = try #require(HuggingFaceProviderImplementation().settingsPickers(context: context).first)
+        let action = try #require(picker.trailingActions.first)
+        let service = "com.steipete.codexbar.tests.settings-cookie-refresh.\(UUID().uuidString)"
+        var observedSourceModes: [ProviderSourceMode] = []
+
+        await KeychainCacheStore.withServiceOverrideForTesting(service) {
+            await KeychainCacheStore.withImplicitTestStoreForTesting {
+                CookieHeaderCache.store(
+                    provider: .huggingface,
+                    cookieHeader: "old-test-cookie",
+                    sourceLabel: "Test old")
+                fixture.store._test_refreshFetchContextObserver = { _, fetchContext in
+                    observedSourceModes.append(fetchContext.sourceMode)
+                }
+                fixture.store._test_providerFetchOutcomeOverride = { provider in
+                    CookieHeaderCache.store(
+                        provider: provider,
+                        cookieHeader: "api-tagged-test-cookie",
+                        sourceLabel: "Test api tagged")
+                    let now = Date()
+                    let usage = UsageSnapshot(
                         primary: nil,
                         secondary: nil,
                         providerCost: ProviderCostSnapshot(
@@ -233,25 +351,36 @@ struct ProviderSettingsDescriptorTests {
                             balance: 9.25,
                             updatedAt: now),
                         updatedAt: now)
-                    fixture.store.lastSourceLabels[provider.instanceID] = "api"
+                    return ProviderFetchOutcome(
+                        result: .success(ProviderFetchResult(
+                            usage: usage,
+                            credits: nil,
+                            dashboard: nil,
+                            sourceLabel: "api",
+                            strategyID: "huggingface.js",
+                            strategyKind: .apiToken)),
+                        attempts: [])
                 }
-                defer { fixture.store._test_providerRefreshOverride = nil }
+                defer {
+                    fixture.store._test_refreshFetchContextObserver = nil
+                    fixture.store._test_providerFetchOutcomeOverride = nil
+                }
 
                 await action.perform()
 
-                #expect(observedIncludeOptionalUsage)
-                #expect(fixture.settings.showOptionalCreditsAndExtraUsage == false)
-                #expect(CookieHeaderCache.load(provider: .huggingface)?.cookieHeader == "new-test-cookie")
-                #expect(picker.trailingText?()?.contains("Test new") == true)
+                #expect(observedSourceModes == [.web])
+                #expect(CookieHeaderCache.load(provider: .huggingface)?.cookieHeader == "old-test-cookie")
+                #expect(picker.trailingText?() == "Failed")
             }
         }
     }
 
     @Test
-    func `hugging face cookie refresh rejects API result without imported balance`() async throws {
-        let fixture = try self.makeSettingsFixture(suite: "ProviderSettingsDescriptorTests-huggingface-refresh-failure")
+    func `hugging face cookie refresh rejects a web result without a wallet balance`() async throws {
+        let fixture = try self.makeSettingsFixture(
+            suite: "ProviderSettingsDescriptorTests-huggingface-refresh-no-balance",
+            environmentBase: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"])
         fixture.settings.huggingFaceCookieSource = .auto
-        fixture.settings.showOptionalCreditsAndExtraUsage = false
         let context = fixture.settingsContext(provider: .huggingface)
         let picker = try #require(HuggingFaceProviderImplementation().settingsPickers(context: context).first)
         let action = try #require(picker.trailingActions.first)
@@ -263,25 +392,33 @@ struct ProviderSettingsDescriptorTests {
                     provider: .huggingface,
                     cookieHeader: "old-test-cookie",
                     sourceLabel: "Test old")
-                fixture.store._test_providerRefreshOverride = { provider in
+                fixture.store._test_providerFetchOutcomeOverride = { provider in
                     CookieHeaderCache.store(
                         provider: provider,
-                        cookieHeader: "invalid-test-cookie",
-                        sourceLabel: "Test invalid")
+                        cookieHeader: "no-wallet-test-cookie",
+                        sourceLabel: "Test no wallet")
                     let now = Date()
-                    fixture.store.snapshots[provider.instanceID] = UsageSnapshot(
+                    let usage = UsageSnapshot(
                         primary: nil,
                         secondary: nil,
                         providerCost: ProviderCostSnapshot(
-                            used: 2.41,
+                            used: 0,
                             limit: 0,
                             currencyCode: "USD",
-                            period: "Reported billing period",
+                            period: "Prepaid credits",
                             updatedAt: now),
                         updatedAt: now)
-                    fixture.store.lastSourceLabels[provider.instanceID] = "api"
+                    return ProviderFetchOutcome(
+                        result: .success(ProviderFetchResult(
+                            usage: usage,
+                            credits: nil,
+                            dashboard: nil,
+                            sourceLabel: "web",
+                            strategyID: "huggingface.web",
+                            strategyKind: .web)),
+                        attempts: [])
                 }
-                defer { fixture.store._test_providerRefreshOverride = nil }
+                defer { fixture.store._test_providerFetchOutcomeOverride = nil }
 
                 await action.perform()
 
