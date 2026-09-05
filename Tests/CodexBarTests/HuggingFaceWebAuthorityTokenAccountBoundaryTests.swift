@@ -156,7 +156,7 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
     }
 
     @Test
-    func `Web wallet presentation outranks populated stacked API account caches without discarding them`() async throws {
+    func `Web wallet outranks populated stacked API caches without discarding them`() async throws {
         let settings = Self.makeSettings(suite: "hf-web-authority-web-projection")
         settings.multiAccountMenuLayout = .stacked
         settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
