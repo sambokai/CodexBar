@@ -88,7 +88,7 @@ complete when the available scan window covers fewer days.
 | Ollama | API key verifies Cloud API access (`api`); browser cookies expose Cloud quota windows (`web`). |
 | Synthetic | API key from config/env → quota API (`api`). |
 | OpenRouter | API token (config, overrides env) → credits API (`api`). |
-| Hugging Face | Auto: API token for personal billing spend (`api`) when available, optionally enriched with a browser-session prepaid Credits wallet (`web`); otherwise returns the wallet. Explicit API/Web select one source. |
+| Hugging Face | Auto: API billing only when an API credential is available; otherwise the Web prepaid Credits wallet when Web billing is enabled. Explicit API and Web selections choose exactly one source. |
 | Perplexity | Browser cookies/manual cookie/env session token → credits API (`web`). |
 | Xiaomi MiMo | Browser cookies → balance/token plan endpoints (`web`). |
 | Doubao | API key from config/env → Volcengine Ark chat-completions probe (`api`). |
@@ -417,16 +417,18 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 ## Hugging Face
 - API spend uses the Hugging Face user access token from `~/.codexbar/config.json` (`providers[].apiKey`), `HF_TOKEN`,
   `HUGGING_FACE_HUB_TOKEN`, or Hugging Face CLI token files and remains independent of the prepaid wallet.
-- Optional prepaid Credits enrichment requests `GET https://huggingface.co/settings/billing` with a normal
-  authenticated Hugging Face browser session cookie. Automatic import is limited to `huggingface.co`; Manual mode
-  accepts a full `Cookie:` header. The `.api` source never looks up cookies.
+- The Web source requests `GET https://huggingface.co/settings/billing` with a normal authenticated Hugging Face
+  browser session cookie. Automatic import is limited to `huggingface.co`; Manual mode accepts a full `Cookie:` header.
+  The `.api` source never looks up cookies.
 - The current wallet is the server-rendered `div[data-props]` field `entity.currentBalanceUsd` for a personal user
   entity. It is already USD; zero and fractional cents are valid. The legacy top-level `invoiceCreditsCents` value is
   converted from safe integer cents only when the current field is absent.
-- Auto mode keeps bearer-token spend authoritative and optionally enriches it with the browser-session wallet; wallet
-  failure leaves valid spend unchanged. Hugging Face does not expose a verified shared identifier across these auth
-  paths, so separately configured credentials are expected to belong to the same account and no unverified page field
-  is used for correlation. Web mode returns a balance-only snapshot without bearer data.
+- Auto mode returns API billing only when a bearer-token credential is available. Without an API credential, it can
+  return the Web prepaid Credits wallet when Web billing is enabled. Hugging Face does not expose a verified shared
+  identifier across these auth paths, so separately configured credentials are expected to belong to the same account
+  and no unverified page field is used for correlation. Web mode returns a balance-only snapshot without bearer data.
+- The Usage source picker provides explicit API/Web selection, each of which selects exactly one source. Cookie source
+  Refresh explicitly validates the Web wallet path; it does not turn ordinary Auto into API-plus-wallet composition.
 - The Balance layout token uses the reported wallet and never derives it from inference allowance, plan, or spend.
 - Status: none yet.
 - Details: `docs/huggingface.md`.

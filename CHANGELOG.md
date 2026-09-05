@@ -2,7 +2,13 @@
 
 ## Unreleased
 
+### Added
+- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
+  bearer-token billing-period spend and category details.
+
 ### Fixed
+- Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
+  and use the existing bounded browser-access retry for explicit cookie refreshes.
 - Codex: retain completed empty session fragments during cost-history scans instead of repeatedly dropping and rediscovering them, without suppressing usage-bearing duplicates or later appended usage (partial fix for #3316; #3402). Thanks @mauriciopolvora!
 - Agent sessions: explicitly force Tailscale CLI mode during remote-host discovery, preventing repeated app-binary crashes on newer Tailscale installations while preserving existing terminal settings (#3397). Thanks @tzioup!
 
@@ -25,18 +31,12 @@
 
 ## 0.56.3 — 2026-09-01
 
-### Added
-- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
-  bearer-token billing-period spend and category details.
-
 ### Performance
 - Claude and Vertex AI: reduce background CPU spent reading transcript metadata and looking up model prices during local cost scans, preserving provider detection and token/cost totals (#3319, #3328).
 - Local costs: skip unnecessary parsing work for discarded oversized log records, preserving complete-record validation and cost totals (#3342).
 - Codex: avoid repeated full scans after trace-log pruning, while retaining the latest validated cost history through temporary trace-database failures (#3318). Thanks @brzvsk!
 
 ### Fixed
-- Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
-  and use the existing bounded browser-access retry for explicit cookie refreshes.
 - Poe: use one refresh timestamp for point-history retention and daily totals, keeping results consistent throughout a refresh.
 - Keychain: limit repeated cache ACL validation and memory growth while preserving recovery after temporary failures or external repairs (#3300, #3301). Thanks @IgorKhramtsov!
 - Grok: restore 0% usage for a validated active billing period with an omitted usage scalar, while keeping incomplete or malformed billing responses unknown (#3261, #3325, #3357). Thanks @sf-jin-ku and @olddonkey!
