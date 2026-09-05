@@ -155,6 +155,70 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
         #expect(snapshots.map { $0.snapshot?.accountEmail(for: .huggingface) } == ["Personal", "Work"])
     }
 
+    @Test
+    func `Web wallet presentation outranks populated stacked API account caches without discarding them`() async throws {
+        let settings = Self.makeSettings(suite: "hf-web-authority-web-projection")
+        settings.multiAccountMenuLayout = .stacked
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let accounts = settings.tokenAccounts(for: .huggingface)
+        let recorder = HuggingFaceAuthorityFetchRecorder()
+        let store = try Self.makeStore(settings: settings, recorder: recorder)
+        let fetcher = UsageFetcher(environment: [:])
+        let controller = StatusItemController(
+            store: store,
+            settings: settings,
+            account: fetcher.loadAccountInfo(),
+            updater: DisabledUpdaterController(),
+            preferencesSelection: PreferencesSelection(),
+            statusBar: testStatusBar())
+        defer { controller.releaseStatusItemsForTesting() }
+
+        await store.refreshProvider(.huggingface)
+
+        let initialAPIRequests = await recorder.apiRequests
+        let initialWebRequests = await recorder.webRequests
+        #expect(initialAPIRequests.count == 2)
+        #expect(initialWebRequests.isEmpty)
+        let initialSnapshots = try #require(store.accountSnapshots[.huggingface])
+        #expect(initialSnapshots.map(\.account.id) == accounts.map(\.id))
+        #expect(initialSnapshots.allSatisfy { $0.sourceLabel == "api" })
+        #expect(initialSnapshots.allSatisfy { $0.snapshot?.providerCost?.balance == nil })
+        let initialDisplay = try #require(controller.tokenAccountMenuDisplay(for: .huggingface))
+        #expect(initialDisplay.layout == .stacked)
+        #expect(initialDisplay.snapshots.map(\.account.id) == accounts.map(\.id))
+        let cachedAPIState = initialSnapshots.map(Self.cacheIdentity)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+
+        let webPhaseAPIRequests = await recorder.apiRequests
+        let webPhaseWebRequests = await recorder.webRequests
+        #expect(webPhaseWebRequests.count == 1)
+        #expect(webPhaseAPIRequests.count == initialAPIRequests.count)
+        #expect(store.lastSourceLabels[.huggingface] == "web")
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+        let webSnapshot = try #require(store.snapshot(for: .huggingface))
+        #expect(webSnapshot.accountEmail(for: .huggingface) != "Personal")
+        #expect(webSnapshot.accountEmail(for: .huggingface) != "Work")
+        let preservedAPISnapshots = try #require(store.accountSnapshots[.huggingface])
+        let preservedAPIState = preservedAPISnapshots.map(Self.cacheIdentity)
+        #expect(preservedAPIState == cachedAPIState)
+        #expect(controller.tokenAccountMenuDisplay(for: .huggingface) == nil)
+        let webCard = try #require(controller.menuCardModel(for: .huggingface))
+        #expect(webCard.provider == .huggingface)
+        #expect(webCard.email != "Personal")
+        #expect(webCard.email != "Work")
+        #expect(webCard.providerCost?.spendLine.contains("42") == true)
+
+        await store.refreshProvider(.huggingface)
+
+        #expect(store.lastSourceLabels[.huggingface] == "api")
+        let restoredDisplay = try #require(controller.tokenAccountMenuDisplay(for: .huggingface))
+        #expect(restoredDisplay.layout == .stacked)
+        #expect(restoredDisplay.snapshots.map(\.account.id) == accounts.map(\.id))
+        #expect(store.accountSnapshots[.huggingface]?.map(Self.cacheIdentity) == cachedAPIState)
+    }
+
     private static func makeSettings(suite: String) -> SettingsStore {
         testSettingsStore(
             suiteName: "\(suite)-\(UUID().uuidString)",
@@ -196,5 +260,22 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
                 cli: baseDescriptor.cli),
             makeFetchContext: baseSpec.makeFetchContext)
         return store
+    }
+
+    private struct CacheIdentity: Equatable {
+        let accountID: UUID
+        let cacheKey: String
+        let sourceLabel: String?
+        let used: Double?
+        let balance: Double?
+    }
+
+    private static func cacheIdentity(_ snapshot: TokenAccountUsageSnapshot) -> CacheIdentity {
+        CacheIdentity(
+            accountID: snapshot.account.id,
+            cacheKey: snapshot.cacheKey,
+            sourceLabel: snapshot.sourceLabel,
+            used: snapshot.snapshot?.providerCost?.used,
+            balance: snapshot.snapshot?.providerCost?.balance)
     }
 }
