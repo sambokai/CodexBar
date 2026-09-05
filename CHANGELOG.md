@@ -7,7 +7,13 @@
 - **Cached custom menu-bar text**: reuse plain text layouts while preserving native highlighting, spacing, display scaling, and colored emoji (#3110).
 - **More reliable usage displays**: show exhausted automatic quotas correctly, accept Kiro plan summaries, and recover rejected Kimi web sessions (#3349, #3359, #3414).
 
+### Added
+- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
+  bearer-token billing-period spend and category details.
+
 ### Fixed
+- Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
+  and use the existing bounded browser-access retry for explicit cookie refreshes.
 - Codex cost: skip loading raw token histories for unchanged sessions while preserving exact request pricing, reasoning totals, and fork accounting; concurrent cache changes safely request a retry (#3297). Thanks @estevecastells!
 - Codex cost: fill missing model-pricing coverage, including cached tokens and long-context Fast usage, and reprice saved rows without rebuilding token history (#3423, #3425).
 - Menu bar: reuse cached template images for single-line text-only custom layouts, preserving native highlighting, display scaling, spacing, and vertical adjustments; colored emoji, rich, stale, and high-contrast content retain their existing rendering (#3110). Thanks @thatlev!
@@ -61,18 +67,12 @@
 
 ## 0.56.3 — 2026-09-01
 
-### Added
-- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
-  bearer-token billing-period spend and category details.
-
 ### Performance
 - Claude and Vertex AI: reduce background CPU spent reading transcript metadata and looking up model prices during local cost scans, preserving provider detection and token/cost totals (#3319, #3328).
 - Local costs: skip unnecessary parsing work for discarded oversized log records, preserving complete-record validation and cost totals (#3342).
 - Codex: avoid repeated full scans after trace-log pruning, while retaining the latest validated cost history through temporary trace-database failures (#3318). Thanks @brzvsk!
 
 ### Fixed
-- Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
-  and use the existing bounded browser-access retry for explicit cookie refreshes.
 - Poe: use one refresh timestamp for point-history retention and daily totals, keeping results consistent throughout a refresh.
 - Keychain: limit repeated cache ACL validation and memory growth while preserving recovery after temporary failures or external repairs (#3300, #3301). Thanks @IgorKhramtsov!
 - Grok: restore 0% usage for a validated active billing period with an omitted usage scalar, while keeping incomplete or malformed billing responses unknown (#3261, #3325, #3357). Thanks @sf-jin-ku and @olddonkey!
