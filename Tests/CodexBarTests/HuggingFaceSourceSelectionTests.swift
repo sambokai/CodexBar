@@ -62,6 +62,53 @@ struct HuggingFaceSourceSelectionTests {
         #expect(snapshot.manualCookieHeader == "hf_session=fixture")
     }
 
+    @Test
+    func `selected web source drives ordinary refresh even when api token exists`() async throws {
+        let fixture = try self.makeFixture(suite: "HuggingFaceSourceSelectionTests-web-refresh")
+        fixture.settings[providerConfig: .huggingface, field: .apiKey] = "hf_fixture_token"
+        fixture.settings.huggingFaceCookieSource = .manual
+        fixture.settings.huggingFaceManualCookieHeader = "hf_session=fixture"
+        fixture.settings.huggingFaceUsageDataSource = .web
+        var observedSourceModes: [ProviderSourceMode] = []
+
+        fixture.store._test_refreshFetchContextObserver = { _, fetchContext in
+            observedSourceModes.append(fetchContext.sourceMode)
+        }
+        fixture.store._test_providerFetchOutcomeOverride = { _ in
+            let now = Date()
+            let usage = UsageSnapshot(
+                primary: nil,
+                secondary: nil,
+                providerCost: ProviderCostSnapshot(
+                    used: 0,
+                    limit: 0,
+                    currencyCode: "USD",
+                    period: "Prepaid credits",
+                    balance: 6.25,
+                    updatedAt: now),
+                updatedAt: now)
+            return ProviderFetchOutcome(
+                result: .success(ProviderFetchResult(
+                    usage: usage,
+                    credits: nil,
+                    dashboard: nil,
+                    sourceLabel: "web",
+                    strategyID: "huggingface.web",
+                    strategyKind: .web)),
+                attempts: [])
+        }
+        defer {
+            fixture.store._test_refreshFetchContextObserver = nil
+            fixture.store._test_providerFetchOutcomeOverride = nil
+        }
+
+        await fixture.store.refreshProvider(.huggingface, allowDisabled: true)
+
+        #expect(observedSourceModes == [.web])
+        #expect(fixture.store.lastSourceLabels[.huggingface] == "web")
+        #expect(fixture.store.snapshot(for: UsageProvider.huggingface.instanceID)?.providerCost?.balance == 6.25)
+    }
+
     private func makeFixture(suite: String) throws -> Fixture {
         let defaults = try #require(UserDefaults(suiteName: suite))
         defaults.removePersistentDomain(forName: suite)
