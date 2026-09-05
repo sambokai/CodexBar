@@ -6,6 +6,10 @@
 - **Fresher spend charts and faster Claude startup:** refresh stale dashboards, resume interrupted Codex scans, and reuse compatible Claude cost reports across launches.
 - **Safer updates and more reliable usage:** refresh Sparkle's installer protections, preserve claude-swap measurement ages, and improve local history and account handling.
 
+### Added
+- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
+  bearer-token billing-period spend and category details.
+
 ### Fixed
 - Usage parsing: reject out-of-range numeric counts in MiMo, Pi/OMP, OpenCodex, and Bedrock instead of trapping at rounded integer limits; preserve existing rounding and valid usage fields, and reparse OpenCodex caches created by the older parser (#3486).
 - Subprocesses: accept very large finite timeouts without overflowing nanosecond conversion.
@@ -21,6 +25,8 @@
 - Overview: keep highlighted provider cards readable on macOS 15 by removing forced vibrancy from card wrappers, while retaining fast GPU selection and native submenu interactions (#3173).
 - Copilot: resolve Enterprise sign-in identities on the configured host, keep equal user IDs on different hosts distinct, and skip public GitHub budget enrichment for Enterprise accounts (#3341). Thanks @Fletcher-Alderton!
 - Local costs: avoid overflow traps in OpenCodex and combined cost reports, keeping unrepresentable token sums unavailable while retaining valid neighboring token classes.
+- Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
+  and use the existing bounded browser-access retry for explicit cookie refreshes.
 - Kiro: route existing overage enrichment to the CLI profile’s supported region instead of always using US East; reject invalid profile ARNs before sending credentials and retain CLI fallback (#3359). Thanks @zucram!
 - Settings: observe rapid external config replacements and edits that restore earlier app-written contents, while keeping successful app writes out of the external-change sync path.
 - Local usage: honor the app’s Low Power Mode interval for automatic Codex catch-up passes in both usage and Spend Dashboard, while retaining manual acceleration and system thermal pauses.
@@ -81,13 +87,7 @@
 - **Cached custom menu-bar text**: reuse plain text layouts while preserving native highlighting, spacing, display scaling, and colored emoji (#3110).
 - **More reliable usage displays**: show exhausted automatic quotas correctly, accept Kiro plan summaries, and recover rejected Kimi web sessions (#3349, #3359, #3414).
 
-### Added
-- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
-  bearer-token billing-period spend and category details.
-
 ### Fixed
-- Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
-  and use the existing bounded browser-access retry for explicit cookie refreshes.
 - Codex cost: skip loading raw token histories for unchanged sessions while preserving exact request pricing, reasoning totals, and fork accounting; concurrent cache changes safely request a retry (#3297). Thanks @estevecastells!
 - Codex cost: fill missing model-pricing coverage, including cached tokens and long-context Fast usage, and reprice saved rows without rebuilding token history (#3423, #3425).
 - Menu bar: reuse cached template images for single-line text-only custom layouts, preserving native highlighting, display scaling, spacing, and vertical adjustments; colored emoji, rich, stale, and high-contrast content retain their existing rendering (#3110). Thanks @thatlev!
