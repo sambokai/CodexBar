@@ -119,14 +119,6 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
 
         return [
             ProviderSettingsPickerDescriptor(
-                id: "huggingface-usage-source",
-                title: "Usage source",
-                subtitle: "Auto uses the API token when available; Browser cookies shows prepaid Credits.",
-                binding: sourceBinding,
-                options: sourceOptions,
-                isVisible: nil,
-                onChange: nil),
-            ProviderSettingsPickerDescriptor(
                 id: "huggingface-cookie-source",
                 title: "Cookie source",
                 subtitle: "Automatically imports Hugging Face browser session cookies.",
@@ -149,6 +141,14 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
                         sourceModeOverride: .web,
                         context: context),
                 ]),
+            ProviderSettingsPickerDescriptor(
+                id: "huggingface-usage-source",
+                title: "Usage source",
+                subtitle: "Auto uses the API token when available; Browser cookies shows prepaid Credits.",
+                binding: sourceBinding,
+                options: sourceOptions,
+                isVisible: nil,
+                onChange: nil),
         ]
     }
 }
