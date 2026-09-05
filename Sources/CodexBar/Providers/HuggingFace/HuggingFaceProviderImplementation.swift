@@ -13,9 +13,15 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
 
     @MainActor
     func observeSettings(_ settings: SettingsStore) {
+        _ = settings.huggingFaceUsageDataSource
         _ = settings[providerConfig: .huggingface, field: .apiKey]
         _ = settings.huggingFaceCookieSource
         _ = settings.huggingFaceManualCookieHeader
+    }
+
+    @MainActor
+    func sourceMode(context: ProviderSourceModeContext) -> ProviderSourceMode {
+        context.settings.huggingFaceUsageDataSource
     }
 
     @MainActor
@@ -84,6 +90,16 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
 
     @MainActor
     func settingsPickers(context: ProviderSettingsContext) -> [ProviderSettingsPickerDescriptor] {
+        let sourceBinding = Binding(
+            get: { context.settings.huggingFaceUsageDataSource.rawValue },
+            set: { raw in
+                context.settings.huggingFaceUsageDataSource = ProviderSourceMode(rawValue: raw) ?? .auto
+            })
+        let sourceOptions: [ProviderSettingsPickerOption] = [
+            ProviderSettingsPickerOption(id: ProviderSourceMode.auto.rawValue, title: "Auto"),
+            ProviderSettingsPickerOption(id: ProviderSourceMode.web.rawValue, title: "Browser cookies"),
+            ProviderSettingsPickerOption(id: ProviderSourceMode.api.rawValue, title: "API token"),
+        ]
         let cookieBinding = Binding(
             get: { context.settings.huggingFaceCookieSource.rawValue },
             set: { raw in
@@ -102,6 +118,14 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
         }
 
         return [
+            ProviderSettingsPickerDescriptor(
+                id: "huggingface-usage-source",
+                title: "Usage source",
+                subtitle: "Auto uses the API token when available; Browser cookies shows prepaid Credits.",
+                binding: sourceBinding,
+                options: sourceOptions,
+                isVisible: nil,
+                onChange: nil),
             ProviderSettingsPickerDescriptor(
                 id: "huggingface-cookie-source",
                 title: "Cookie source",
