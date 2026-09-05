@@ -129,6 +129,7 @@ struct HuggingFaceSourceSelectionTests {
         let settings: SettingsStore
         let store: UsageStore
 
+        @MainActor
         func settingsContext() -> ProviderSettingsContext {
             ProviderSettingsContext(
                 provider: .huggingface,
