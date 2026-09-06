@@ -34,7 +34,7 @@ struct ProviderIconResourcesTests {
             contentsOf: resources.appending(path: "ProviderIcon-huggingface.svg"),
             encoding: .utf8)
 
-        #expect(svg.contains("viewBox=\"0 0 1500 1500\""))
+        #expect(svg.contains("viewBox=\"0 0 24 24\""))
         #expect(svg.contains("<path"))
         #expect(!svg.contains("<rect x=\"8\" y=\"8\" width=\"48\" height=\"48\""))
 
