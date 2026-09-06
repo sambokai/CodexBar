@@ -15,6 +15,7 @@ private struct HuggingFaceBillingHTTPCase: Sendable {
     let retryAfterSeconds: Double?
 }
 
+// swiftlint:disable:next type_body_length
 struct HuggingFaceUsageStatsTests {
     @Test(arguments: BundledPluginTestSupport.engines)
     func `current billing period spend and identity match the finite API payload`(
@@ -325,11 +326,12 @@ struct HuggingFaceUsageStatsTests {
         #expect(HuggingFaceSettingsReader.token(environment: [
             HuggingFaceSettingsReader.tokenEnvironmentKey: "  'hf_fixture_token'  ",
         ]) == "hf_fixture_token")
-        let isolatedHome = FileManager.default.temporaryDirectory
-            .appendingPathComponent("HuggingFaceUsageStatsTests-no-token-\(UUID().uuidString)")
         #expect(HuggingFaceSettingsReader.token(
-            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "  \"  \" "],
-            homeDirectory: isolatedHome) == nil)
+            environment: [
+                HuggingFaceSettingsReader.tokenEnvironmentKey: "  \"  \" ",
+                HuggingFaceSettingsReader.tokenPathEnvironmentKey: Self.noCredentialTokenPath(),
+            ],
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser) == nil)
 
         let descriptor = ProviderDescriptorRegistry.descriptor(for: .huggingface)
         #expect(descriptor.metadata.displayName == "Hugging Face")
@@ -656,20 +658,29 @@ struct HuggingFaceUsageStatsTests {
 
     @Test
     func `auto falls back to cookie only balance when API is unavailable`() async throws {
-        let cookieOnly = HuggingFaceAutoFetchStrategy(
-            apiStrategy: Self.apiStrategy(transport: Self.transport()),
-            webStrategy: HuggingFaceWebFetchStrategy(
-                transport: Self.walletTransport(balance: 7.5),
-                resolveCookieHeader: { _ in "session=fixture" }))
-        let cookieOnlyContext = Self.fetchContext(
-            sourceMode: .auto,
-            environment: [:],
-            settings: Self.manualCookieSettings())
-        #expect(await cookieOnly.isAvailable(cookieOnlyContext))
-        let cookieOnlyResult = try await cookieOnly.fetch(cookieOnlyContext)
+        let cookieOnlyResult = try await Self.cookieOnlyResult()
         #expect(cookieOnlyResult.usage.providerCost?.used == 0)
         #expect(cookieOnlyResult.usage.providerCost?.balance == 7.5)
         #expect(cookieOnlyResult.usage.identity == nil)
+    }
+
+    @Test
+    func `cookie only auto selection does not read the default credential file`() async throws {
+        let cookieOnlyContext = Self.fetchContext(
+            sourceMode: .auto,
+            environment: Self.noCredentialEnvironment(),
+            settings: Self.manualCookieSettings())
+
+        // The fixture carries no credential by its own inputs: even a logged-in developer `hf auth login`
+        // token file must not flip this selection from the wallet to API billing.
+        #expect(HuggingFaceSettingsReader.token(
+            environment: cookieOnlyContext.env,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser) == nil)
+        let result = try await Self.cookieOnlyResult(context: cookieOnlyContext)
+        #expect(result.strategyID == "huggingface.web")
+        #expect(result.sourceLabel == "web")
+        #expect(result.usage.providerCost?.balance == 7.5)
+        #expect(result.usage.identity == nil)
     }
 
     @Test
@@ -738,10 +749,26 @@ struct HuggingFaceUsageStatsTests {
 
     private static func fetchContext(
         sourceMode: ProviderSourceMode = .api,
-        environment: [String: String] = [:],
+        environment: [String: String]? = nil,
         settings: ProviderSettingsSnapshot? = nil,
         includeOptionalUsage: Bool = true,
         webTimeout: TimeInterval = 1) -> ProviderFetchContext
+    {
+        let environment = environment ?? Self.noCredentialEnvironment()
+        return Self.context(
+            environment: environment,
+            sourceMode: sourceMode,
+            settings: settings,
+            includeOptionalUsage: includeOptionalUsage,
+            webTimeout: webTimeout)
+    }
+
+    private static func context(
+        environment: [String: String],
+        sourceMode: ProviderSourceMode,
+        settings: ProviderSettingsSnapshot?,
+        includeOptionalUsage: Bool,
+        webTimeout: TimeInterval) -> ProviderFetchContext
     {
         ProviderFetchContext(
             runtime: .app,
@@ -756,6 +783,33 @@ struct HuggingFaceUsageStatsTests {
             fetcher: UsageFetcher(environment: environment),
             claudeFetcher: HuggingFaceTestClaudeFetcher(),
             browserDetection: BrowserDetection(cacheTTL: 0))
+    }
+
+    private static func cookieOnlyResult(context: ProviderFetchContext? = nil) async throws -> ProviderFetchResult {
+        let cookieOnly = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: Self.walletTransport(balance: 7.5),
+                resolveCookieHeader: { _ in "session=fixture" }))
+        let context = context ?? Self.fetchContext(
+            sourceMode: .auto,
+            settings: Self.manualCookieSettings())
+        #expect(await cookieOnly.isAvailable(context))
+        return try await cookieOnly.fetch(context)
+    }
+
+    /// Environments that must resolve without an API credential never rely on the developer machine's
+    /// `~/.cache/huggingface/token`. `HF_TOKEN_PATH` selects the token file before the default cache path,
+    /// so an isolated missing path keeps these fixtures credential-free even after `hf auth login`.
+    /// Call sites with an explicit fixture token keep their own environment untouched.
+    static func noCredentialEnvironment() -> [String: String] {
+        [HuggingFaceSettingsReader.tokenPathEnvironmentKey: self.noCredentialTokenPath()]
+    }
+
+    static func noCredentialTokenPath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("HuggingFaceUsageStatsTests-no-token-\(UUID().uuidString)")
+            .path
     }
 
     private static func manualCookieSettings() -> ProviderSettingsSnapshot {
@@ -1200,7 +1254,7 @@ struct HuggingFaceProviderSettingsTests {
         #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
             provider: .huggingface,
             settings: settings,
-            environment: [:])))
+            environment: HuggingFaceUsageStatsTests.noCredentialEnvironment())))
 
         let picker = try #require(implementation.settingsPickers(context: context).first)
         #expect(picker.id == "huggingface-cookie-source")
@@ -1215,7 +1269,7 @@ struct HuggingFaceProviderSettingsTests {
         #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
             provider: .huggingface,
             settings: settings,
-            environment: [:])))
+            environment: HuggingFaceUsageStatsTests.noCredentialEnvironment())))
 
         field.binding.wrappedValue = "hf_second_fixture_token"
         #expect(settings.huggingFaceCookieSource == .manual)
@@ -1228,19 +1282,50 @@ struct HuggingFaceProviderSettingsTests {
         #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
             provider: .huggingface,
             settings: settings,
-            environment: [:])) == false)
+            environment: HuggingFaceUsageStatsTests.noCredentialEnvironment())) == false)
 
         picker.binding.wrappedValue = ProviderCookieSource.auto.rawValue
         #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
             provider: .huggingface,
             settings: settings,
-            environment: [:])))
+            environment: HuggingFaceUsageStatsTests.noCredentialEnvironment())))
 
         picker.binding.wrappedValue = ProviderCookieSource.off.rawValue
         #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
             provider: .huggingface,
             settings: settings,
-            environment: [:])) == false)
+            environment: HuggingFaceUsageStatsTests.noCredentialEnvironment())) == false)
+    }
+
+    @Test
+    func `app availability stays false without settings credentials or an isolated token`() {
+        let settings = Self.noCredentialSettings()
+        let implementation = HuggingFaceProviderImplementation()
+        let environment = HuggingFaceUsageStatsTests.noCredentialEnvironment()
+
+        // The empty store carries no token and the cookie source is off, so availability must rest on
+        // the caller's own isolated environment: a logged-in developer token file must not make this
+        // fixture available.
+        #expect(HuggingFaceSettingsReader.token(
+            environment: environment,
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser) == nil)
+        #expect(implementation.isAvailable(context: ProviderAvailabilityContext(
+            provider: .huggingface,
+            settings: settings,
+            environment: environment)) == false)
+    }
+
+    private static func noCredentialSettings() -> SettingsStore {
+        let suite = "HuggingFaceProviderSettingsTests-no-credential-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite) ?? UserDefaults.standard
+        defaults.removePersistentDomain(forName: suite)
+        let settings = SettingsStore(
+            userDefaults: defaults,
+            configStore: testConfigStore(suiteName: suite),
+            zaiTokenStore: NoopZaiTokenStore(),
+            syntheticTokenStore: NoopSyntheticTokenStore())
+        settings.huggingFaceCookieSource = .off
+        return settings
     }
 }
 
