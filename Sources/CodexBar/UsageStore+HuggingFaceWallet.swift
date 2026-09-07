@@ -9,6 +9,19 @@ extension UsageStore {
     func applyHuggingFaceWalletOutcome(provider: UsageProvider, result: ProviderFetchResult) {
         // Provider-specific by design: Hugging Face publishes one provider-level browser wallet.
         guard provider == .huggingface else { return }
+        // Web-kind success (explicit Web mode and cookie-only Auto): the fresh browser snapshot
+        // itself owns the visible wallet. Clear the prior provider-level auxiliary publication and
+        // record the observed wallet so a later failed Auto/API refresh cannot hide the validated
+        // Credits behind a wallet-less cached account snapshot.
+        if result.strategyKind == .web, let balance = result.usage.providerCost?.balance {
+            self.huggingFaceBrowserWallets[provider.instanceID] = nil
+            self.huggingFaceWebOwnedWallets[provider.instanceID] = HuggingFaceWalletSnapshot(
+                balanceUSD: balance,
+                observedAt: result.usage.providerCost?.balanceUpdatedAt ?? result.usage.updatedAt)
+            return
+        }
+        // API-kind success: every non-failure outcome supersedes any recorded Web-owned wallet.
+        self.huggingFaceWebOwnedWallets[provider.instanceID] = nil
         // Deterministic publication rules for the provider-level browser wallet:
         // composed → clear (the wallet lives on the matching account card);
         // observed → publish fresh; unavailable/notAttempted → clear. A nil outcome (API failure
@@ -32,11 +45,13 @@ extension UsageStore {
         guard provider == .huggingface else { return }
         if !HuggingFaceBrowserWalletPolicy.isWalletEligible(context) || context.sourceMode == .api {
             self.huggingFaceBrowserWallets[provider.instanceID] = nil
+            self.huggingFaceWebOwnedWallets[provider.instanceID] = nil
         }
     }
 
     /// Provider-specific by design (FP-194): a per-account Hugging Face Auto fetch can only prove a
-    /// *local* bearer/browser identity match. This batch post-pass determines global uniqueness:
+    /// *local* bearer/browser identity match. This batch post-pass applies the shared batch-
+    /// authoritative decision (`HuggingFaceWalletBatchReconciliation`) exactly once:
     ///
     /// * exactly one composed account → keep that composition, clear provider-level wallet state;
     /// * more than one composed account → strip the wallet from every account snapshot and publish
@@ -48,13 +63,14 @@ extension UsageStore {
         _ results: [TokenAccountFetchResult]) -> [TokenAccountFetchResult]
     {
         // Provider-specific by design: Hugging Face's wallet is one provider-level browser value.
-        let composedResults = results.filter { result in
-            guard case let .success(fetchResult) = result.outcome.result else { return false }
-            return fetchResult.huggingFaceWalletOutcome?.isLocalMatchComposed == true
+        let walletOutcomes = results.map { result -> HuggingFaceBrowserWalletOutcome? in
+            guard case let .success(fetchResult) = result.outcome.result else { return nil }
+            return fetchResult.huggingFaceWalletOutcome
         }
+        let reconciled = HuggingFaceWalletBatchReconciliation.reconcile(walletOutcomes)
 
         var rewritten = results
-        if composedResults.count > 1 {
+        if reconciled.stripsCompositions {
             // Ambiguous attribution: no account card may own the wallet. Strip every provisional
             // composition so the single browser value renders once at provider level.
             rewritten = results.map { result in
@@ -62,7 +78,8 @@ extension UsageStore {
                       fetchResult.huggingFaceWalletOutcome?.isLocalMatchComposed == true
                 else { return result }
                 let strippedOutcome = fetchResult
-                    .replacingUsage(Self.strippingHuggingFaceWalletBalance(from: fetchResult.usage))
+                    .replacingUsage(HuggingFaceWalletBatchReconciliation.strippingWalletBalance(
+                        from: fetchResult.usage))
                     .replacingSourceLabel("api")
                     .replacingWalletOutcome(nil)
                 return TokenAccountFetchResult(
@@ -74,50 +91,35 @@ extension UsageStore {
             }
         }
 
-        // Provider-specific by design: Hugging Face publishes the wallet once at provider level.
-        if composedResults.count == 1 {
+        // Apply the batch-authoritative publication decision. Every superseding decision also
+        // clears the recorded Web-owned wallet; only failure transitions preserve it.
+        switch reconciled.decision {
+        case .composedOnAccount, .clear:
             self.huggingFaceBrowserWallets[.huggingface] = nil
-        } else if composedResults.count > 1 {
-            let wallet = composedResults.lazy.compactMap { result -> HuggingFaceWalletSnapshot? in
-                guard case let .success(fetchResult) = result.outcome.result else { return nil }
-                return fetchResult.huggingFaceWalletOutcome?.composedWallet
-            }.first
-            if let wallet {
-                self.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
-                    balanceUSD: wallet.balanceUSD,
-                    observedAt: wallet.observedAt,
-                    attribution: .multipleMatchingAccounts)
-            }
-        } else if let observation = results.compactMap({ result -> HuggingFaceBrowserWalletPublication? in
-            guard case let .success(fetchResult) = result.outcome.result else { return nil }
-            return fetchResult.huggingFaceWalletOutcome?.providerLevelPublication
-        }).first {
-            self.huggingFaceBrowserWallets[.huggingface] = observation
-        } else if results.contains(where: { result in
-            guard case let .success(fetchResult) = result.outcome.result else { return false }
-            switch fetchResult.huggingFaceWalletOutcome {
-            case .unavailable, .notAttempted: return true
-            default: return false
-            }
-        }) {
-            self.huggingFaceBrowserWallets[.huggingface] = nil
+            self.huggingFaceWebOwnedWallets[.huggingface] = nil
+        case let .providerLevel(publication):
+            self.huggingFaceBrowserWallets[.huggingface] = publication
+            self.huggingFaceWebOwnedWallets[.huggingface] = nil
+        case .noTransition:
+            break
         }
         return rewritten
     }
 
-    private static func strippingHuggingFaceWalletBalance(from usage: UsageSnapshot) -> UsageSnapshot {
-        guard let cost = usage.providerCost, cost.balance != nil else { return usage }
-        let strippedCost = ProviderCostSnapshot(
-            used: cost.used,
-            limit: cost.limit,
-            currencyCode: cost.currencyCode,
-            period: cost.period,
-            resetsAt: cost.resetsAt,
-            nextRegenAmount: cost.nextRegenAmount,
-            personalUsed: cost.personalUsed,
-            balance: nil,
-            balanceUpdatedAt: nil,
-            updatedAt: cost.updatedAt)
-        return usage.with(providerCost: strippedCost)
+    /// Provider-specific by design (FP-194): a failed Auto/API refresh makes no wallet transition
+    /// of its own, but it can replace the visible Web snapshot with a wallet-less cached account
+    /// snapshot. When a validated browser wallet was published by a successful Web-kind refresh,
+    /// keep it visible once at provider level with `.webSession` attribution until the next
+    /// successful refresh supersedes it.
+    func reconcileHuggingFaceWalletAfterFetchFailure(provider: UsageProvider, error: any Error) {
+        // Provider-specific by design: Hugging Face is the only provider whose browser wallet can
+        // outlive a failed refresh through this recovery publication.
+        guard provider == .huggingface else { return }
+        guard !Self.errorIsCancellation(error) else { return }
+        guard let wallet = self.huggingFaceWebOwnedWallets[provider.instanceID] else { return }
+        self.huggingFaceBrowserWallets[provider.instanceID] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: wallet.balanceUSD,
+            observedAt: wallet.observedAt,
+            attribution: .webSession)
     }
 }

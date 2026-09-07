@@ -202,7 +202,7 @@ struct HuggingFaceDualSourceStoreTests {
     }
 
     @Test
-    func `cli batch post pass strips ambiguous compositions and keeps unique ones`() {
+    func `cli batch decision strips ambiguous compositions and publishes one provider wallet`() {
         let accountA = ProviderTokenAccount(
             id: UUID(),
             label: "A",
@@ -215,12 +215,19 @@ struct HuggingFaceDualSourceStoreTests {
             token: "hf_b",
             addedAt: 0,
             lastUsed: nil)
-        let composedA = Self.batchEntry(account: accountA, composed: true)
-        let composedB = Self.batchEntry(account: accountB, composed: true)
+        let batch = CodexBarCLI.reconciledHuggingFaceWalletBatch([
+            Self.batchEntry(account: accountA, composed: true),
+            Self.batchEntry(account: accountB, composed: true),
+        ])
 
-        let stripped = CodexBarCLI.reconciledHuggingFaceWalletBatch([composedA, composedB])
-        #expect(stripped.count == 2)
-        for entry in stripped {
+        guard case let .providerLevel(publication) = batch.decision else {
+            Issue.record("Expected a provider-level decision for multiple matching accounts")
+            return
+        }
+        #expect(publication.balanceUSD == 9.25)
+        #expect(publication.attribution == .multipleMatchingAccounts)
+        #expect(batch.entries.count == 2)
+        for entry in batch.entries {
             guard case let .success(result) = entry.outcome.result else {
                 Issue.record("Expected a successful batch entry")
                 continue
@@ -229,18 +236,218 @@ struct HuggingFaceDualSourceStoreTests {
             #expect(result.usage.providerCost?.balance == nil)
             #expect(result.huggingFaceWalletOutcome == nil)
         }
+    }
 
-        // A unique local match survives the CLI post-pass untouched.
-        let single = CodexBarCLI.reconciledHuggingFaceWalletBatch([
-            composedA,
+    @Test
+    func `cli batch decision keeps unique composition and renders no provider duplicate`() {
+        let accountA = ProviderTokenAccount(
+            id: UUID(),
+            label: "A",
+            token: "hf_a",
+            addedAt: 0,
+            lastUsed: nil)
+        let accountB = ProviderTokenAccount(
+            id: UUID(),
+            label: "B",
+            token: "hf_b",
+            addedAt: 0,
+            lastUsed: nil)
+        let batch = CodexBarCLI.reconciledHuggingFaceWalletBatch([
+            Self.batchEntry(account: accountA, composed: true),
             Self.batchEntry(account: accountB, composed: false),
         ])
-        guard case let .success(keptResult) = single[0].outcome.result else {
+
+        // The unique composition owns the wallet; the mismatched account's provisional
+        // provider-level outcome must not render a second copy of the same wallet.
+        guard case .composedOnAccount = batch.decision else {
+            Issue.record("Expected a composed-on-account decision for a unique match")
+            return
+        }
+        guard case let .success(keptResult) = batch.entries[0].outcome.result else {
             Issue.record("Expected the unique composition to survive")
             return
         }
         #expect(keptResult.sourceLabel == "api+web")
         #expect(keptResult.usage.providerCost?.balance == 9.25)
+    }
+
+    @Test
+    func `cli batch decision publishes one unverified provider wallet when nothing composes`() {
+        let accountA = ProviderTokenAccount(
+            id: UUID(),
+            label: "A",
+            token: "hf_a",
+            addedAt: 0,
+            lastUsed: nil)
+        let accountB = ProviderTokenAccount(
+            id: UUID(),
+            label: "B",
+            token: "hf_b",
+            addedAt: 0,
+            lastUsed: nil)
+        let batch = CodexBarCLI.reconciledHuggingFaceWalletBatch([
+            Self.batchEntry(account: accountA, composed: false),
+            Self.batchEntry(account: accountB, composed: false),
+        ])
+
+        guard case let .providerLevel(publication) = batch.decision else {
+            Issue.record("Expected a provider-level decision for zero matching accounts")
+            return
+        }
+        #expect(publication.balanceUSD == 9.25)
+        #expect(publication.attribution == .unverified)
+        #expect(batch.entries.count == 2)
+    }
+
+    @Test
+    func `cli single account mismatch decides one provider wallet`() {
+        let account = ProviderTokenAccount(
+            id: UUID(),
+            label: "Only",
+            token: "hf_only",
+            addedAt: 0,
+            lastUsed: nil)
+        let batch = CodexBarCLI.reconciledHuggingFaceWalletBatch([
+            Self.batchEntry(account: account, composed: false),
+        ])
+
+        guard case let .providerLevel(publication) = batch.decision else {
+            Issue.record("Expected a provider-level wallet for a single-account mismatch")
+            return
+        }
+        #expect(publication.balanceUSD == 9.25)
+        #expect(publication.attribution == .unverified)
+    }
+
+    @Test
+    func `cli single account composition stays on the account`() {
+        let account = ProviderTokenAccount(
+            id: UUID(),
+            label: "Only",
+            token: "hf_only",
+            addedAt: 0,
+            lastUsed: nil)
+        let batch = CodexBarCLI.reconciledHuggingFaceWalletBatch([
+            Self.batchEntry(account: account, composed: true),
+        ])
+
+        guard case .composedOnAccount = batch.decision else {
+            Issue.record("Expected the composed wallet to stay on the single account")
+            return
+        }
+    }
+
+    @Test
+    func `cli batch with failed fetches makes no wallet transition`() {
+        let account = ProviderTokenAccount(
+            id: UUID(),
+            label: "Only",
+            token: "hf_only",
+            addedAt: 0,
+            lastUsed: nil)
+        let outcome = ProviderFetchOutcome(
+            result: .failure(ProviderPluginError.script("fixture API outage")),
+            attempts: [])
+        let batch = CodexBarCLI.reconciledHuggingFaceWalletBatch([
+            (account, outcome),
+        ])
+
+        guard case .noTransition = batch.decision else {
+            Issue.record("Expected no wallet transition when every fetch failed before wallet work")
+            return
+        }
+    }
+
+    @Test
+    func `provider level wallet output renders once across text cards and json`() async {
+        let publication = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 9.25,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .multipleMatchingAccounts)
+        let decision = HuggingFaceWalletBatchDecision.providerLevel(publication)
+
+        // Text renders exactly one wallet section.
+        var textOutput = UsageCommandOutput()
+        await CodexBarCLI.appendHuggingFaceProviderWalletOutput(
+            decision: decision,
+            status: nil,
+            command: Self.renderCommand(format: .text, cardsLayout: false),
+            output: &textOutput)
+        #expect(textOutput.sections.count == 1)
+        #expect(textOutput.sections[0].contains("Browser session wallet"))
+        #expect(textOutput.sections[0].contains("9.25"))
+        #expect(textOutput.payload.isEmpty)
+        #expect(textOutput.cards.isEmpty)
+
+        // Cards render exactly one wallet card.
+        var cardsOutput = UsageCommandOutput()
+        await CodexBarCLI.appendHuggingFaceProviderWalletOutput(
+            decision: decision,
+            status: nil,
+            command: Self.renderCommand(format: .text, cardsLayout: true),
+            output: &cardsOutput)
+        #expect(cardsOutput.cards.count == 1)
+        #expect(cardsOutput.cards[0].provider == .huggingface)
+        #expect(cardsOutput.sections.isEmpty)
+        #expect(cardsOutput.payload.isEmpty)
+
+        // JSON renders exactly one provider-level payload without account attribution.
+        var jsonOutput = UsageCommandOutput()
+        await CodexBarCLI.appendHuggingFaceProviderWalletOutput(
+            decision: decision,
+            status: nil,
+            command: Self.renderCommand(format: .json, cardsLayout: false),
+            output: &jsonOutput)
+        #expect(jsonOutput.payload.count == 1)
+        #expect(jsonOutput.payload[0].provider == "huggingface")
+        #expect(jsonOutput.payload[0].account == nil)
+        #expect(jsonOutput.payload[0].cacheAccountKey == nil)
+        #expect(jsonOutput.payload[0].source == "web")
+        #expect(jsonOutput.payload[0].usage?.details.first?.title == "Browser session wallet")
+        #expect(jsonOutput.sections.isEmpty)
+        #expect(jsonOutput.cards.isEmpty)
+    }
+
+    @Test
+    func `provider wallet output renders nothing when an account owns the composition`() async {
+        var output = UsageCommandOutput()
+        await CodexBarCLI.appendHuggingFaceProviderWalletOutput(
+            decision: .composedOnAccount,
+            status: nil,
+            command: Self.renderCommand(format: .json, cardsLayout: false),
+            output: &output)
+        #expect(output.payload.isEmpty)
+        #expect(output.sections.isEmpty)
+        #expect(output.cards.isEmpty)
+
+        var clearedOutput = UsageCommandOutput()
+        await CodexBarCLI.appendHuggingFaceProviderWalletOutput(
+            decision: .clear,
+            status: nil,
+            command: Self.renderCommand(format: .json, cardsLayout: false),
+            output: &clearedOutput)
+        #expect(clearedOutput.payload.isEmpty)
+    }
+
+    private static func renderCommand(format: OutputFormat, cardsLayout: Bool) -> UsageCommandContext {
+        UsageCommandContext(
+            format: format,
+            includeCredits: false,
+            sourceModeOverride: nil,
+            antigravityPlanDebug: false,
+            augmentDebug: false,
+            webDebugDumpHTML: false,
+            webTimeout: 1,
+            verbose: false,
+            useColor: false,
+            resetStyle: .countdown,
+            weeklyWorkDays: nil,
+            jsonOnly: false,
+            includeAllCodexAccounts: false,
+            fetcher: UsageFetcher(environment: [:]),
+            claudeFetcher: ClaudeUsageFetcher(browserDetection: BrowserDetection(cacheTTL: 0)),
+            browserDetection: BrowserDetection(cacheTTL: 0),
+            cardsLayout: cardsLayout)
     }
 
     private static func batchEntry(

@@ -27,6 +27,13 @@
 - Overview: keep highlighted provider cards readable on macOS 15 by removing forced vibrancy from card wrappers, while retaining fast GPU selection and native submenu interactions (#3173).
 - Copilot: resolve Enterprise sign-in identities on the configured host, keep equal user IDs on different hosts distinct, and skip public GitHub budget enrichment for Enterprise accounts (#3341). Thanks @Fletcher-Alderton!
 - Local costs: avoid overflow traps in OpenCodex and combined cost reports, keeping unrepresentable token sums unavailable while retaining valid neighboring token classes.
+- Hugging Face: decide wallet attribution once per automatic-mode batch, so several matching accounts render the
+  wallet once at provider level instead of nowhere, a unique match no longer duplicates the wallet with a mismatched
+  provider-level copy, and single-account runs with mismatched or unverifiable identity still show one
+  provider-level wallet.
+- Hugging Face: keep explicit and persisted Web mode outside API token-account attribution with one provider-level
+  Web result per command batch, clear stale auxiliary wallet state when a fresh Web snapshot publishes, and keep
+  validated browser Credits visible as browser-session data when the best-effort follow-up refresh fails.
 - Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
   use the existing bounded browser-access retry for explicit cookie refreshes, and restore the combined spend and
   wallet snapshot immediately after a successful refresh instead of waiting for the next cycle.
