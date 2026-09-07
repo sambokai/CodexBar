@@ -172,15 +172,15 @@ final class UsageStore {
     var lastFetchAttempts: [ProviderInstanceID: [ProviderFetchAttempt]] = [:]
     /// Provider-specific by design: one in-memory provider-level browser wallet, never account-cached.
     var huggingFaceBrowserWallets: [ProviderInstanceID: HuggingFaceBrowserWalletPublication] = [:]
-    // Provider-specific by design: the most recently published browser wallet from a successful
-    // Hugging Face Web-kind snapshot (explicit Web mode or cookie-only Auto). The fresh Web snapshot
-    // itself owns the visible wallet, so this record is kept separate from the auxiliary publication
-    // and only restores visibility when a later failed Auto/API refresh replaces that snapshot with
-    // a wallet-less cached account snapshot. Holds balance and timestamp only — no credential data.
+    /// Provider-specific by design: the most recently published browser wallet from a successful
+    /// Hugging Face Web-kind snapshot (explicit Web mode or cookie-only Auto). The fresh Web snapshot
+    /// itself owns the visible wallet, so this record is kept separate from the auxiliary publication
+    /// and only restores visibility when a later failed Auto/API refresh replaces that snapshot with
+    /// a wallet-less cached account snapshot. Holds balance and timestamp only — no credential data.
     var huggingFaceWebOwnedWallets: [ProviderInstanceID: HuggingFaceWalletSnapshot] = [:]
-    // Provider-specific by design: marks that the recorded Hugging Face Web-owned wallet is the
-    // currently live provider snapshot, so only a pending Auto/API replacement that provably
-    // displaces it may trigger `.webSession` failure recovery. Any superseding success clears it.
+    /// Provider-specific by design: marks that the recorded Hugging Face Web-owned wallet is the
+    /// currently live provider snapshot, so only a pending Auto/API replacement that provably
+    /// displaces it may trigger `.webSession` failure recovery. Any superseding success clears it.
     var huggingFaceLiveWebSnapshotOwners: Set<ProviderInstanceID> = []
     // Provider-specific by design: marks that the validated Web-owned live snapshot is at least
     // provisionally displaced by an in-flight Auto/API replacement. Only the failure transition

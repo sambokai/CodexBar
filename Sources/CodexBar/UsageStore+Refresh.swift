@@ -379,20 +379,19 @@ extension UsageStore {
             self.scheduleClaudeSwapAccountRefresh(generation: generation)
         }
 
-        // Provider-specific by design (FP-194): reconcile browser-wallet eligibility before any
-        // fetch dispatch — including the stacked fan-out path below — so disabling the browser
-        // authority or selecting isolated API mode clears stale provider-level wallets even when
-        // the subsequent API request fails.
-        let walletEligibilityContext = self.makeFetchContext(provider: provider, override: nil)
-        self.reconcileHuggingFaceWalletEligibility(provider: provider, context: walletEligibilityContext)
-
         let tokenAccountPreparation = self.tokenAccountRefreshPreparation(for: provider)
+        let tokenAccount = self.settings.effectiveSelectedTokenAccount(for: provider)
+        let walletEligibilityContext = self.makeFetchContext(provider: provider, override: nil)
+        self.prepareHuggingFaceWalletRefresh(
+            provider: provider,
+            context: walletEligibilityContext,
+            selectedTokenAccount: tokenAccount)
+
         if self.shouldFetchAllTokenAccounts(provider: provider, accounts: tokenAccountPreparation.accounts) {
             await self.refreshTokenAccounts(
                 provider: provider,
                 accounts: tokenAccountPreparation.accounts,
-                generation: generation,
-                webOverrideRefresh: Self.requestedSourceModeOverride == .web)
+                generation: generation)
             return nil
         } else {
             _ = await MainActor.run {
@@ -402,7 +401,6 @@ extension UsageStore {
             }
         }
 
-        let tokenAccount = self.settings.effectiveSelectedTokenAccount(for: provider)
         let fetchContext = self.makeFetchContext(
             provider: provider,
             override: nil,

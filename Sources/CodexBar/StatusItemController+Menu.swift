@@ -714,7 +714,7 @@ extension StatusItemController {
             {
                 self.addFleetAccountMenuCards(fleetProjection.additionalAccounts, to: menu, context: context)
                 self.addHuggingFaceProviderWalletSection(
-                    to: captureMenu ?? menu,
+                    to: menu,
                     provider: context.currentProvider,
                     width: context.menuWidth)
                 return false

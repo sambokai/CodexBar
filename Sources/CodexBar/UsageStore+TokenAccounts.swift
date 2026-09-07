@@ -558,22 +558,13 @@ extension UsageStore {
         }
     }
 
-    /// Token-account fan-out refresh. `webOverrideRefresh` marks explicit-Web override refreshes,
-    /// whose wallet snapshot stays live while the browser cookies are revalidated; Auto/API
-    /// fan-out refreshes always displace it, so the arming call below is where explicit Web and
-    /// Auto/API refreshes diverge for `.webSession` failure-recovery provenance.
+    /// Token-account fan-out refresh. Provider-level preparation, including Hugging Face Web-wallet
+    /// displacement, runs before routing reaches this stacked-account branch.
     func refreshTokenAccounts(
         provider: UsageProvider,
         accounts: [ProviderTokenAccount],
-        generation: UInt64? = nil,
-        webOverrideRefresh: Bool = false) async
+        generation: UInt64? = nil) async
     {
-        if !webOverrideRefresh {
-            // Each Auto/API fan-out refresh that starts provisionally displaces a recorded
-            // Web-owned live snapshot, so a later per-account failure consumes it exactly once.
-            // Only Hugging Face maintains that displacement state.
-            self.beginHuggingFaceWebSnapshotDisplacement(provider: provider)
-        }
         guard let selectedAccount = self.settings.effectiveSelectedTokenAccount(for: provider) else {
             self.reconcileSelectedTokenAccountSnapshotBeforeRefresh(provider: provider, accounts: accounts)
             return
