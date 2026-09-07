@@ -7,8 +7,10 @@
 - **Safer updates and more reliable usage:** refresh Sparkle's installer protections, preserve claude-swap measurement ages, and improve local history and account handling.
 
 ### Added
-- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
-  bearer-token billing-period spend and category details.
+- Hugging Face: show bearer-token billing spend and the browser-session prepaid Credits wallet together in
+  automatic mode. Private cross-authority identity matching (`whoami-v2` opaque user IDs) gates composition;
+  mismatched or unverifiable accounts still show both values, with the wallet labeled as browser-session data.
+  Stacked token-account batches observe the wallet once and only a uniquely matched account composes it.
 
 ### Fixed
 - Usage parsing: reject out-of-range numeric counts in MiMo, Pi/OMP, OpenCodex, and Bedrock instead of trapping at rounded integer limits; preserve existing rounding and valid usage fields, and reparse OpenCodex caches created by the older parser (#3486).
@@ -26,7 +28,8 @@
 - Copilot: resolve Enterprise sign-in identities on the configured host, keep equal user IDs on different hosts distinct, and skip public GitHub budget enrichment for Enterprise accounts (#3341). Thanks @Fletcher-Alderton!
 - Local costs: avoid overflow traps in OpenCodex and combined cost reports, keeping unrepresentable token sums unavailable while retaining valid neighboring token classes.
 - Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
-  and use the existing bounded browser-access retry for explicit cookie refreshes.
+  use the existing bounded browser-access retry for explicit cookie refreshes, and restore the combined spend and
+  wallet snapshot immediately after a successful refresh instead of waiting for the next cycle.
 - Kiro: route existing overage enrichment to the CLI profile’s supported region instead of always using US East; reject invalid profile ARNs before sending credentials and retain CLI fallback (#3359). Thanks @zucram!
 - Settings: observe rapid external config replacements and edits that restore earlier app-written contents, while keeping successful app writes out of the external-change sync path.
 - Local usage: honor the app’s Low Power Mode interval for automatic Codex catch-up passes in both usage and Spend Dashboard, while retaining manual acceleration and system thermal pauses.

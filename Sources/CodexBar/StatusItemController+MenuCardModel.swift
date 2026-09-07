@@ -178,7 +178,32 @@ extension StatusItemController {
         } else {
             override ?? self.store.presentationSnapshot(for: provider)
         }
-        return self.subscriptionMetadataSnapshot(baseSnapshot, provider: provider, surface: surface)
+        let metadataSnapshot = self.subscriptionMetadataSnapshot(
+            baseSnapshot,
+            provider: provider,
+            surface: surface)
+        return self.huggingFaceProviderWalletSnapshot(
+            metadataSnapshot,
+            provider: provider,
+            surface: surface)
+    }
+
+    /// Provider-specific by design (FP-194): when Hugging Face's browser wallet cannot be composed
+    /// into an account snapshot, the store publishes it as one provider-level value. The live
+    /// ambient card carries it as an authority-labeled detail row so both the API spend and the
+    /// wallet remain visible without implying same-account ownership.
+    private func huggingFaceProviderWalletSnapshot(
+        _ snapshot: UsageSnapshot?,
+        provider: UsageProvider,
+        surface: CodexConsumerProjection.Surface) -> UsageSnapshot?
+    {
+        // Provider-specific by design: only Hugging Face publishes a provider-level browser wallet.
+        guard provider == .huggingface, surface == .liveCard,
+              let snapshot,
+              let publication = self.store.huggingFaceBrowserWallets[provider.instanceID],
+              let section = HuggingFaceWalletPresentation.detailSection(publication)
+        else { return snapshot }
+        return snapshot.appendingDetailSection(section)
     }
 
     private func subscriptionMetadataSnapshot(

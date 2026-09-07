@@ -8,7 +8,6 @@ defineProvider({
 
   async fetchUsage(ctx) {
     const root = "https://huggingface.co";
-    const identityCacheTTLSeconds = 12 * 60 * 60;
 
     function parseFailure(message) {
       throw ctx.fail.parseFailure(`Could not parse Hugging Face billing data: ${message}`);
@@ -26,13 +25,6 @@ defineProvider({
         parseFailure(`${field} must be a non-empty string`);
       }
       return value.trim();
-    }
-
-    function optionalString(value, field) {
-      if (value === null || value === undefined) return null;
-      if (typeof value !== "string") parseFailure(`${field} must be a string`);
-      const trimmed = value.trim();
-      return trimmed || null;
     }
 
     function nonnegativeFiniteNumber(value) {
@@ -104,34 +96,6 @@ defineProvider({
       }
     }
 
-    function parseIdentity(profile) {
-      const value = object(profile, "identity response");
-      const username = requiredString(value.name, "identity.name");
-      const email = optionalString(value.email, "identity.email");
-      if (value.isPro !== undefined && value.isPro !== null && typeof value.isPro !== "boolean") {
-        parseFailure("identity.isPro must be a boolean");
-      }
-      return {
-        email: email || undefined,
-        accountID: username,
-        ...(value.isPro === true ? { loginMethod: "PRO" } : {}),
-      };
-    }
-
-    async function fetchIdentity(ctx) {
-      const token = ctx.settings.getSecret("HF_TOKEN");
-      if (typeof token !== "string" || !token.trim()) return null;
-
-      const cacheKey = "huggingface.identity:" + token;
-      const cached = ctx.cache.get(cacheKey);
-      if (cached !== undefined) return cached;
-
-      const profile = await getJSON(root + "/api/whoami-v2", "identity");
-      const identity = parseIdentity(profile);
-      ctx.cache.set(cacheKey, identity, identityCacheTTLSeconds);
-      return identity;
-    }
-
     function parsePeriod(period) {
       const value = object(period, "billing.period");
       const periodStartText = requiredString(value.periodStart, "billing.period.periodStart");
@@ -187,7 +151,6 @@ defineProvider({
     // This settings response is the selected finite billing source. Sum only the categories it returns;
     // do not infer whole-account coverage or credits from other Hugging Face billing routes.
     const billing = object(await getJSON(`${root}/api/settings/billing/usage`, "billing"), "billing response");
-    // Billing is authoritative and is intentionally fetched before optional identity enrichment.
     const period = parsePeriod(billing.period);
     const usage = object(billing.usage, "billing.usage");
     const categoryRows = [];
@@ -218,12 +181,8 @@ defineProvider({
     if (!Number.isFinite(totalUSD)) parseFailure("billing cost total overflowed");
     categoryRows.sort(compareRows);
 
-    let identity = null;
-    try {
-      identity = await fetchIdentity(ctx);
-    } catch {
-      // Billing remains useful when identity is unavailable or malformed.
-    }
+    // Identity (whoami-v2) and account ownership matching are owned by CodexBar's Swift-side
+    // Hugging Face identity service; the plugin reports billing data only.
 
     const periodStartLabel = period.periodStart.toISOString().slice(0, 10);
     const periodEndLabel = period.periodEnd.toISOString().slice(0, 10);
@@ -235,7 +194,6 @@ defineProvider({
         period: "Reported billing period",
         resetsAt: period.periodEnd,
       },
-      identity,
       dataConfidence: "exact",
       details: [
         {
@@ -243,7 +201,6 @@ defineProvider({
           rows: [
             { label: "Billing period", value: `${periodStartLabel} – ${periodEndLabel}` },
             { label: "Reported spend", value: ctx.format.usd(totalUSD) },
-            ...(identity && identity.loginMethod === "PRO" ? [{ label: "Plan", value: "PRO" }] : []),
           ],
         },
         {

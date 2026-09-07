@@ -320,6 +320,23 @@ extension CodexBarCLI {
         var output = UsageCommandOutput()
         let accountRefreshDelay = TokenAccountSupportCatalog
             .support(for: provider)?.minimumDelayBetweenAccountRefreshes
+
+        // Provider-specific by design (FP-194): a multi-account Hugging Face Auto batch shares one
+        // wallet batch scope, so the browser wallet is observed once and ambiguous identity matches
+        // render one provider-level wallet instead of once per account.
+        let huggingFaceWalletBatch: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)]? =
+            // Provider-specific by design: Hugging Face is the only provider with a browser wallet.
+            if provider == .huggingface, selections.count > 1 {
+                await Self.fetchHuggingFaceWalletBatch(
+                    selections: selections,
+                    accountRefreshDelay: accountRefreshDelay,
+                    status: status,
+                    tokenContext: tokenContext,
+                    command: command)
+            } else {
+                nil
+            }
+
         for (index, account) in selections.enumerated() {
             if index > 0, let accountRefreshDelay {
                 do {
@@ -328,15 +345,372 @@ extension CodexBarCLI {
                     return output
                 }
             }
+            let prefetched = huggingFaceWalletBatch.flatMap { batch in
+                batch.first { $0.account?.id == account?.id }
+            }
             let result = await Self.fetchUsageOutput(
                 provider: provider,
                 account: account,
                 status: status,
                 tokenContext: tokenContext,
-                command: command)
+                command: command,
+                prefetchedOutcome: prefetched?.outcome)
             output.merge(result)
         }
+        if let huggingFaceWalletBatch {
+            await Self.appendHuggingFaceProviderWalletOutput(
+                batch: huggingFaceWalletBatch,
+                status: status,
+                tokenContext: tokenContext,
+                command: command,
+                output: &output)
+        }
         return output
+    }
+
+    /// Provider-specific by design: phase 1 of the multi-account Hugging Face batch — fetch every
+    /// account with one shared wallet batch scope, then apply the same global-uniqueness post-pass
+    /// as the app's stacked fan-out before any rendering happens.
+    private static func fetchHuggingFaceWalletBatch(
+        selections: [ProviderTokenAccount?],
+        accountRefreshDelay: Duration?,
+        status: ProviderStatusPayload?,
+        tokenContext: TokenAccountCLIContext,
+        command: UsageCommandContext) async -> [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)]
+    {
+        let scope = HuggingFaceWalletBatchScope()
+        var fetched: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)] = []
+        for (index, account) in selections.enumerated() {
+            if index > 0, let accountRefreshDelay {
+                do {
+                    try await Task.sleep(for: accountRefreshDelay)
+                } catch {
+                    return fetched
+                }
+            }
+            let context = self.makeUsageFetchContext(
+                provider: .huggingface,
+                account: account,
+                tokenContext: tokenContext,
+                command: command,
+                huggingFaceWalletBatchScope: scope)
+            let outcome = await self.fetchProviderUsage(provider: .huggingface, context: context)
+            fetched.append((account: account, outcome: outcome))
+        }
+        return Self.reconciledHuggingFaceWalletBatch(fetched)
+    }
+
+    /// Provider-specific by design: strips provisional wallet compositions when more than one
+    /// token account matched the browser identity, mirroring
+    /// `UsageStore.reconcileHuggingFaceWalletAttribution`.
+    static func reconciledHuggingFaceWalletBatch(
+        _ fetched: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)])
+        -> [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)]
+    {
+        let composedCount = fetched.count(where: { entry in
+            guard case let .success(result) = entry.outcome.result else { return false }
+            return result.huggingFaceWalletOutcome?.isLocalMatchComposed == true
+        })
+        guard composedCount > 1 else { return fetched }
+        return fetched.map { entry in
+            guard case let .success(result) = entry.outcome.result,
+                  result.huggingFaceWalletOutcome?.isLocalMatchComposed == true
+            else { return entry }
+            let stripped = result
+                .replacingUsage(Self.strippingHuggingFaceWalletBalance(from: result.usage))
+                .replacingSourceLabel("api")
+                .replacingWalletOutcome(nil)
+            return (
+                entry.account,
+                ProviderFetchOutcome(result: .success(stripped), attempts: entry.outcome.attempts))
+        }
+    }
+
+    /// Renders the single provider-level browser wallet for a multi-account batch when identity
+    /// attribution is unverified or ambiguous.
+    private static func appendHuggingFaceProviderWalletOutput(
+        batch: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)],
+        status: ProviderStatusPayload?,
+        tokenContext: TokenAccountCLIContext,
+        command: UsageCommandContext,
+        output: inout UsageCommandOutput) async
+    {
+        let publication = batch.compactMap { entry -> HuggingFaceBrowserWalletPublication? in
+            guard case let .success(result) = entry.outcome.result else { return nil }
+            return result.huggingFaceWalletOutcome?.providerLevelPublication
+        }.first
+        guard let publication else { return }
+        guard let walletSection = HuggingFaceWalletPresentation.detailSection(publication) else { return }
+        let usage = UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            providerCost: nil,
+            details: [walletSection],
+            updatedAt: publication.observedAt,
+            identity: nil)
+        switch command.format {
+        case .text:
+            if command.cardsLayout {
+                // Provider-specific by design: the browser wallet renders once for Hugging Face.
+                output.cards.append(CLICardsRenderer.makeCard(CLICardBuildInput(
+                    provider: .huggingface,
+                    snapshot: usage,
+                    credits: nil,
+                    source: "web",
+                    status: status,
+                    notes: [],
+                    useColor: command.useColor,
+                    resetStyle: command.resetStyle,
+                    weeklyWorkDays: command.weeklyWorkDays,
+                    now: publication.observedAt)))
+            } else {
+                output.sections.append(CLIRenderer.renderText(
+                    provider: .huggingface,
+                    snapshot: usage,
+                    credits: nil,
+                    context: RenderContext(
+                        header: "Hugging Face · Browser session wallet",
+                        status: nil,
+                        useColor: command.useColor,
+                        resetStyle: command.resetStyle,
+                        weeklyWorkDays: command.weeklyWorkDays,
+                        notes: [])))
+            }
+        case .json:
+            // Provider-specific by design: the browser wallet payload is Hugging Face-specific.
+            output.payload.append(self.makeUsagePayload(
+                provider: .huggingface,
+                accountLabel: nil,
+                cacheAccountKey: nil,
+                version: nil,
+                source: "web",
+                status: status,
+                usage: usage,
+                credits: nil,
+                antigravityPlanInfo: nil,
+                dashboard: nil,
+                diagnostic: nil,
+                weeklyWorkDays: command.weeklyWorkDays))
+        }
+    }
+
+    private static func strippingHuggingFaceWalletBalance(from usage: UsageSnapshot) -> UsageSnapshot {
+        guard let cost = usage.providerCost, cost.balance != nil else { return usage }
+        let strippedCost = ProviderCostSnapshot(
+            used: cost.used,
+            limit: cost.limit,
+            currencyCode: cost.currencyCode,
+            period: cost.period,
+            resetsAt: cost.resetsAt,
+            nextRegenAmount: cost.nextRegenAmount,
+            personalUsed: cost.personalUsed,
+            balance: nil,
+            balanceUpdatedAt: nil,
+            updatedAt: cost.updatedAt)
+        return usage.with(providerCost: strippedCost)
+    }
+
+    private static func makeUsageFetchContext(
+        provider: UsageProvider,
+        account: ProviderTokenAccount?,
+        codexVisibleAccount: CodexVisibleAccount? = nil,
+        tokenContext: TokenAccountCLIContext,
+        command: UsageCommandContext,
+        huggingFaceWalletBatchScope: HuggingFaceWalletBatchScope? = nil) -> ProviderFetchContext
+    {
+        let env = tokenContext.environment(
+            base: ProcessInfo.processInfo.environment,
+            provider: provider,
+            account: account,
+            codexActiveSourceOverride: codexVisibleAccount?.selectionSource)
+        let settings = tokenContext.settingsSnapshot(
+            for: provider,
+            account: account,
+            codexActiveSourceOverride: codexVisibleAccount?.selectionSource)
+        let baseSource = command.sourceModeOverride ?? tokenContext.preferredSourceMode(for: provider)
+        let effectiveSourceMode = tokenContext.effectiveSourceMode(
+            base: baseSource,
+            provider: provider,
+            account: account)
+
+        // Provider-specific by design: Codex PAT User-Agent needs the CLI version before the fetch starts.
+        let resolvedCLIVersion = provider == .codex
+            ? self.detectVersion(for: provider, browserDetection: command.browserDetection)
+            : nil
+        return ProviderFetchContext(
+            runtime: command.providerRuntime,
+            sourceMode: effectiveSourceMode,
+            includeCredits: command.includeCredits,
+            requiresOptionalUsageCompleteness: true,
+            webTimeout: command.webTimeout,
+            webDebugDumpHTML: command.webDebugDumpHTML,
+            verbose: command.verbose,
+            env: env,
+            settings: settings,
+            fetcher: tokenContext.fetcher(base: command.fetcher, provider: provider, env: env),
+            claudeFetcher: command.claudeFetcher,
+            browserDetection: command.browserDetection,
+            selectedTokenAccountID: account?.id,
+            tokenAccountTokenUpdater: tokenContext.tokenUpdater(for: account),
+            providerManualTokenUpdater: tokenContext.manualTokenUpdater(),
+            persistsCLISessions: self.persistsCLISessions(provider: provider, command: command),
+            persistentCLISessionIdleWindow: command.persistentCLISessionIdleWindow,
+            resolvedCLIVersion: resolvedCLIVersion,
+            huggingFaceWalletBatchScope: huggingFaceWalletBatchScope)
+    }
+
+    private static func fetchUsageOutput(
+        provider: UsageProvider,
+        account: ProviderTokenAccount?,
+        codexVisibleAccount: CodexVisibleAccount? = nil,
+        status: ProviderStatusPayload?,
+        tokenContext: TokenAccountCLIContext,
+        command: UsageCommandContext,
+        prefetchedOutcome: ProviderFetchOutcome? = nil) async -> UsageCommandOutput
+    {
+        var output = UsageCommandOutput()
+        let env = tokenContext.environment(
+            base: ProcessInfo.processInfo.environment,
+            provider: provider,
+            account: account,
+            codexActiveSourceOverride: codexVisibleAccount?.selectionSource)
+        let settings = tokenContext.settingsSnapshot(
+            for: provider,
+            account: account,
+            codexActiveSourceOverride: codexVisibleAccount?.selectionSource)
+        let configSource = tokenContext.preferredSourceMode(for: provider)
+        let baseSource = command.sourceModeOverride ?? configSource
+        let effectiveSourceMode = tokenContext.effectiveSourceMode(
+            base: baseSource,
+            provider: provider,
+            account: account)
+        let cacheAccountKey = Self.usageCacheAccountKey(
+            provider: provider,
+            account: account,
+            codexVisibleAccount: codexVisibleAccount)
+
+        #if !os(macOS)
+        if Self.sourceModeRequiresWebSupport(
+            effectiveSourceMode,
+            provider: provider,
+            environment: env,
+            settings: settings)
+        {
+            return Self.webSourceUnsupportedOutput(
+                provider: provider,
+                account: (
+                    label: account?.label ?? codexVisibleAccount?.menuDisplayName,
+                    cacheKey: cacheAccountKey),
+                source: effectiveSourceMode.rawValue,
+                status: status,
+                command: command)
+        }
+        #endif
+
+        let fetchContext = self.makeUsageFetchContext(
+            provider: provider,
+            account: account,
+            codexVisibleAccount: codexVisibleAccount,
+            tokenContext: tokenContext,
+            command: command)
+        let outcome: ProviderFetchOutcome = if let prefetchedOutcome {
+            // Provider-specific by design: a Hugging Face batch phase-1 fetch reused here so the
+            // global wallet attribution post-pass can run before rendering.
+            prefetchedOutcome
+        } else {
+            await Self.fetchProviderUsage(provider: provider, context: fetchContext)
+        }
+        if command.verbose, !command.jsonOnly {
+            Self.printFetchAttempts(provider: provider, attempts: outcome.attempts)
+        }
+
+        switch outcome.result {
+        case let .success(result):
+            let antigravityPlanInfo = await Self.fetchAntigravityPlanInfoIfNeeded(
+                provider: provider,
+                command: command)
+            await Self.emitAugmentDebugIfNeeded(provider: provider, command: command)
+
+            var usage = result.usage.scoped(to: provider)
+            if let account {
+                usage = tokenContext.applyAccountLabel(usage, provider: provider, account: account)
+            } else if let codexVisibleAccount {
+                usage = tokenContext.applyCodexVisibleAccountLabel(usage, account: codexVisibleAccount)
+            }
+
+            var dashboard = result.dashboard
+            // Provider-specific by design: JSON preserves Codex's optional behavioral dashboard payload.
+            if dashboard == nil, command.format == .json, provider == .codex {
+                dashboard = Self.loadOpenAIDashboardIfAvailable(
+                    usage: usage,
+                    sourceLabel: result.sourceLabel,
+                    context: fetchContext)
+            }
+
+            let shouldDetectVersion = Self.shouldDetectVersion(provider: provider, result: result)
+            let version = Self.normalizeVersion(
+                raw: shouldDetectVersion
+                    ? (fetchContext.resolvedCLIVersion
+                        ?? Self.detectVersion(for: provider, browserDetection: command.browserDetection))
+                    : nil)
+            let source = result.sourceLabel
+            let notes = Self.usageTextNotes(
+                provider: provider,
+                sourceMode: effectiveSourceMode,
+                resolvedSourceLabel: source,
+                dataConfidence: usage.dataConfidence) + (result.diagnostic.map { [$0] } ?? [])
+
+            Self.appendSuccessRenderOutput(
+                UsageSuccessRenderInput(
+                    provider: provider,
+                    accountLabel: account?.label ?? codexVisibleAccount?.menuDisplayName,
+                    cacheAccountKey: cacheAccountKey,
+                    version: version,
+                    source: source,
+                    status: status,
+                    usage: usage,
+                    credits: result.credits,
+                    antigravityPlanInfo: antigravityPlanInfo,
+                    dashboard: dashboard,
+                    effectiveSourceMode: effectiveSourceMode,
+                    command: command,
+                    diagnostic: result.diagnostic,
+                    notes: notes),
+                output: &output)
+        case let .failure(error):
+            output.exitCode = Self.mapError(error)
+            if command.format == .json {
+                output.payload.append(Self.makeProviderErrorPayload(
+                    provider: provider,
+                    account: account?.label ?? codexVisibleAccount?.menuDisplayName,
+                    cacheAccountKey: cacheAccountKey,
+                    source: effectiveSourceMode.rawValue,
+                    status: status,
+                    error: error,
+                    kind: .provider))
+            } else if command.cardsLayout {
+                output.cardFailures.append(CLICardFailure(
+                    provider: provider,
+                    accountLabel: account?.label ?? codexVisibleAccount?.menuDisplayName,
+                    message: error.localizedDescription))
+            } else if !command.jsonOnly {
+                if let accountLabel = account?.label ?? codexVisibleAccount?.menuDisplayName {
+                    Self.writeStderr(
+                        "Error (\(provider.rawValue) - \(accountLabel)): \(error.localizedDescription)\n")
+                } else {
+                    Self.writeStderr("Error: \(error.localizedDescription)\n")
+                }
+                if let summary = Self.kiloAutoFallbackSummary(
+                    provider: provider,
+                    sourceMode: effectiveSourceMode,
+                    attempts: outcome.attempts)
+                {
+                    Self.writeStderr("\(summary)\n")
+                }
+            }
+        }
+
+        return await Self.finishUsageOutput(output, provider: provider, command: command)
     }
 
     private static func accountSelections(from accounts: [ProviderTokenAccount]) -> [ProviderTokenAccount?] {
@@ -458,170 +832,6 @@ extension CodexBarCLI {
                 diagnostic: input.diagnostic,
                 weeklyWorkDays: input.command.weeklyWorkDays))
         }
-    }
-
-    private static func fetchUsageOutput(
-        provider: UsageProvider,
-        account: ProviderTokenAccount?,
-        codexVisibleAccount: CodexVisibleAccount? = nil,
-        status: ProviderStatusPayload?,
-        tokenContext: TokenAccountCLIContext,
-        command: UsageCommandContext) async -> UsageCommandOutput
-    {
-        var output = UsageCommandOutput()
-        let env = tokenContext.environment(
-            base: ProcessInfo.processInfo.environment,
-            provider: provider,
-            account: account,
-            codexActiveSourceOverride: codexVisibleAccount?.selectionSource)
-        let settings = tokenContext.settingsSnapshot(
-            for: provider,
-            account: account,
-            codexActiveSourceOverride: codexVisibleAccount?.selectionSource)
-        let configSource = tokenContext.preferredSourceMode(for: provider)
-        let baseSource = command.sourceModeOverride ?? configSource
-        let effectiveSourceMode = tokenContext.effectiveSourceMode(
-            base: baseSource,
-            provider: provider,
-            account: account)
-        let cacheAccountKey = Self.usageCacheAccountKey(
-            provider: provider,
-            account: account,
-            codexVisibleAccount: codexVisibleAccount)
-
-        #if !os(macOS)
-        if Self.sourceModeRequiresWebSupport(
-            effectiveSourceMode,
-            provider: provider,
-            environment: env,
-            settings: settings)
-        {
-            return Self.webSourceUnsupportedOutput(
-                provider: provider,
-                account: (
-                    label: account?.label ?? codexVisibleAccount?.menuDisplayName,
-                    cacheKey: cacheAccountKey),
-                source: effectiveSourceMode.rawValue,
-                status: status,
-                command: command)
-        }
-        #endif
-
-        // Provider-specific by design: Codex PAT User-Agent needs the CLI version before the fetch starts.
-        let resolvedCLIVersion = provider == .codex
-            ? Self.detectVersion(for: provider, browserDetection: command.browserDetection)
-            : nil
-        let fetchContext = ProviderFetchContext(
-            runtime: command.providerRuntime,
-            sourceMode: effectiveSourceMode,
-            includeCredits: command.includeCredits,
-            requiresOptionalUsageCompleteness: true,
-            webTimeout: command.webTimeout,
-            webDebugDumpHTML: command.webDebugDumpHTML,
-            verbose: command.verbose,
-            env: env,
-            settings: settings,
-            fetcher: tokenContext.fetcher(base: command.fetcher, provider: provider, env: env),
-            claudeFetcher: command.claudeFetcher,
-            browserDetection: command.browserDetection,
-            selectedTokenAccountID: account?.id,
-            tokenAccountTokenUpdater: tokenContext.tokenUpdater(for: account),
-            providerManualTokenUpdater: tokenContext.manualTokenUpdater(),
-            persistsCLISessions: Self.persistsCLISessions(provider: provider, command: command),
-            persistentCLISessionIdleWindow: command.persistentCLISessionIdleWindow,
-            resolvedCLIVersion: resolvedCLIVersion)
-        let outcome = await Self.fetchProviderUsage(provider: provider, context: fetchContext)
-        if command.verbose, !command.jsonOnly {
-            Self.printFetchAttempts(provider: provider, attempts: outcome.attempts)
-        }
-
-        switch outcome.result {
-        case let .success(result):
-            let antigravityPlanInfo = await Self.fetchAntigravityPlanInfoIfNeeded(
-                provider: provider,
-                command: command)
-            await Self.emitAugmentDebugIfNeeded(provider: provider, command: command)
-
-            var usage = result.usage.scoped(to: provider)
-            if let account {
-                usage = tokenContext.applyAccountLabel(usage, provider: provider, account: account)
-            } else if let codexVisibleAccount {
-                usage = tokenContext.applyCodexVisibleAccountLabel(usage, account: codexVisibleAccount)
-            }
-
-            var dashboard = result.dashboard
-            // Provider-specific by design: JSON preserves Codex's optional behavioral dashboard payload.
-            if dashboard == nil, command.format == .json, provider == .codex {
-                dashboard = Self.loadOpenAIDashboardIfAvailable(
-                    usage: usage,
-                    sourceLabel: result.sourceLabel,
-                    context: fetchContext)
-            }
-
-            let shouldDetectVersion = Self.shouldDetectVersion(provider: provider, result: result)
-            let version = Self.normalizeVersion(
-                raw: shouldDetectVersion
-                    ? (resolvedCLIVersion
-                        ?? Self.detectVersion(for: provider, browserDetection: command.browserDetection))
-                    : nil)
-            let source = result.sourceLabel
-            let notes = Self.usageTextNotes(
-                provider: provider,
-                sourceMode: effectiveSourceMode,
-                resolvedSourceLabel: source,
-                dataConfidence: usage.dataConfidence) + (result.diagnostic.map { [$0] } ?? [])
-
-            Self.appendSuccessRenderOutput(
-                UsageSuccessRenderInput(
-                    provider: provider,
-                    accountLabel: account?.label ?? codexVisibleAccount?.menuDisplayName,
-                    cacheAccountKey: cacheAccountKey,
-                    version: version,
-                    source: source,
-                    status: status,
-                    usage: usage,
-                    credits: result.credits,
-                    antigravityPlanInfo: antigravityPlanInfo,
-                    dashboard: dashboard,
-                    effectiveSourceMode: effectiveSourceMode,
-                    command: command,
-                    diagnostic: result.diagnostic,
-                    notes: notes),
-                output: &output)
-        case let .failure(error):
-            output.exitCode = Self.mapError(error)
-            if command.format == .json {
-                output.payload.append(Self.makeProviderErrorPayload(
-                    provider: provider,
-                    account: account?.label ?? codexVisibleAccount?.menuDisplayName,
-                    cacheAccountKey: cacheAccountKey,
-                    source: effectiveSourceMode.rawValue,
-                    status: status,
-                    error: error,
-                    kind: .provider))
-            } else if command.cardsLayout {
-                output.cardFailures.append(CLICardFailure(
-                    provider: provider,
-                    accountLabel: account?.label ?? codexVisibleAccount?.menuDisplayName,
-                    message: error.localizedDescription))
-            } else if !command.jsonOnly {
-                if let accountLabel = account?.label ?? codexVisibleAccount?.menuDisplayName {
-                    Self.writeStderr(
-                        "Error (\(provider.rawValue) - \(accountLabel)): \(error.localizedDescription)\n")
-                } else {
-                    Self.writeStderr("Error: \(error.localizedDescription)\n")
-                }
-                if let summary = Self.kiloAutoFallbackSummary(
-                    provider: provider,
-                    sourceMode: effectiveSourceMode,
-                    attempts: outcome.attempts)
-                {
-                    Self.writeStderr("\(summary)\n")
-                }
-            }
-        }
-
-        return await Self.finishUsageOutput(output, provider: provider, command: command)
     }
 
     static func shouldDetectVersion(provider: UsageProvider, result: ProviderFetchResult) -> Bool {

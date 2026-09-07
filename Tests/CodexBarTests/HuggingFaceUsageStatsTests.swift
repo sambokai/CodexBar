@@ -18,9 +18,7 @@ private struct HuggingFaceBillingHTTPCase: Sendable {
 // swiftlint:disable:next type_body_length
 struct HuggingFaceUsageStatsTests {
     @Test(arguments: BundledPluginTestSupport.engines)
-    func `current billing period spend and identity match the finite API payload`(
-        engine: ProviderPluginEngineKind) async throws
-    {
+    func `current billing period spend matches the finite API payload`(engine: ProviderPluginEngineKind) async throws {
         let transport = Self.transport()
         let snapshot = try await Self.fetch(engine: engine, transport: transport)
 
@@ -37,13 +35,8 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.providerCost?.balance == nil)
         #expect(snapshot.providerCost?.nextRegenAmount == nil)
         #expect(snapshot.dataConfidence == .exact)
-        #expect(snapshot.identity?.providerID == .huggingface)
-        #expect(snapshot.identity?.accountEmail == "fixture@example.com")
-        #expect(snapshot.identity?.accountID == "fixture-user")
-        #expect(snapshot.identity?.loginMethod == "PRO")
         #expect(snapshot.detailRow(label: "Billing period")?.value == "2026-08-01 – 2026-09-01")
         #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
-        #expect(snapshot.detailRow(label: "Plan")?.value == "PRO")
         #expect(snapshot.details.map(\.title) == ["Billing summary", "Usage breakdown"])
         #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
         #expect(snapshot.details.last?.rows.map(\.value) == ["$1.75", "$0.66"])
@@ -60,10 +53,7 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.providerCost?.period == "Reported billing period")
         #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
         #expect(snapshot.details.last?.rows.map(\.label) == ["Endpoints", "Spaces"])
-        #expect(requests.map { $0.url?.path } == [
-            "/api/settings/billing/usage",
-            "/api/whoami-v2",
-        ])
+        #expect(requests.map { $0.url?.path } == ["/api/settings/billing/usage"])
         #expect(requests.allSatisfy { $0.url?.path != "/api/settings/billing/usage-v2" })
         #expect(snapshot.primary == nil)
         #expect(snapshot.secondary == nil)
@@ -120,23 +110,26 @@ struct HuggingFaceUsageStatsTests {
         #expect(snapshot.providerCost?.limit == 0)
     }
 
-    @Test(arguments: BundledPluginTestSupport.engines)
-    func `only a positively known PRO plan is rendered`(engine: ProviderPluginEngineKind) async throws {
+    @Test
+    func `only a positively known PRO plan is rendered by the identity service`() async throws {
         let profiles = [
-            #"{"name":"fixture-user","email":"fixture@example.com","isPro":true}"#,
-            #"{"name":"fixture-user","email":"fixture@example.com","isPro":false}"#,
-            #"{"name":"fixture-user","email":"fixture@example.com"}"#,
-            #"{"name":"fixture-user","email":"fixture@example.com","isPro":null}"#,
+            #"{"type":"user","id":"opaque-1","name":"fixture-user","email":"fixture@example.com","isPro":true}"#,
+            #"{"type":"user","id":"opaque-2","name":"fixture-user","email":"fixture@example.com","isPro":false}"#,
+            #"{"type":"user","id":"opaque-3","name":"fixture-user","email":"fixture@example.com"}"#,
+            #"{"type":"user","id":"opaque-4","name":"fixture-user","email":"fixture@example.com","isPro":null}"#,
         ]
 
         for (index, profile) in profiles.enumerated() {
-            let snapshot = try await Self.fetch(engine: engine, profileBody: profile)
+            let transport = ProviderHTTPTransportStub { _ in
+                try Self.response(url: HuggingFaceIdentityService.whoamiURL, body: profile, statusCode: 200)
+            }
+            let service = HuggingFaceIdentityService(transport: transport)
+            let identity = try await service.identity(bearerToken: "hf_fixture_token", timeout: 1)
+            let display = identity?.displayIdentitySnapshot(provider: .huggingface)
             if index == 0 {
-                #expect(snapshot.identity?.loginMethod == "PRO")
-                #expect(snapshot.detailRow(label: "Plan")?.value == "PRO")
+                #expect(display?.loginMethod == "PRO")
             } else {
-                #expect(snapshot.identity?.loginMethod == nil)
-                #expect(snapshot.detailRow(label: "Plan") == nil)
+                #expect(display?.loginMethod == nil)
             }
         }
     }
@@ -290,11 +283,10 @@ struct HuggingFaceUsageStatsTests {
         _ = try await Self.fetch(engine: engine, transport: transport)
         let requests = await transport.requests()
 
-        #expect(requests.count == 2)
-        #expect(requests.map { $0.url?.path } == [
-            "/api/settings/billing/usage",
-            "/api/whoami-v2",
-        ])
+        // The plugin performs exactly one billing request per fetch; identity probing lives in
+        // the Swift-side identity service.
+        #expect(requests.count == 1)
+        #expect(requests.map { $0.url?.path } == ["/api/settings/billing/usage"])
         for request in requests {
             let url = try #require(request.url)
             #expect(url.scheme == "https")
@@ -543,9 +535,10 @@ struct HuggingFaceUsageStatsTests {
     }
 
     @Test
-    func `auto with API keeps the API snapshot authoritative when a browser wallet is available`() async throws {
+    func `auto composes a matched browser wallet onto the API snapshot`() async throws {
         let recorder = HuggingFaceCookieResolutionRecorder()
         let apiTransport = Self.transport()
+        let identityTransport = Self.identityTransport()
         let webTransport = Self.walletTransport(balance: 9.25)
         let auto = HuggingFaceAutoFetchStrategy(
             apiStrategy: Self.apiStrategy(transport: apiTransport),
@@ -554,29 +547,47 @@ struct HuggingFaceUsageStatsTests {
                 resolveCookieHeader: { _ in
                     await recorder.record()
                     return "session=fixture"
-                }))
+                }),
+            identityService: HuggingFaceIdentityService(transport: identityTransport))
+
         let result = try await auto.fetch(Self.fetchContext(
             sourceMode: .auto,
             environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
             settings: Self.manualCookieSettings()))
 
+        // Local exact identity match: API spend plus the wallet, labeled api+web.
         #expect(result.strategyID == "huggingface.js")
-        #expect(result.sourceLabel == "api")
+        #expect(result.sourceLabel == "api+web")
         #expect(result.usage.providerCost?.used == 2.41)
-        #expect(result.usage.providerCost?.balance == nil)
+        #expect(result.usage.providerCost?.balance == 9.25)
+        #expect(result.usage.providerCost?.balanceUpdatedAt != nil)
         #expect(result.usage.providerCost?.period == "Reported billing period")
         #expect(result.usage.providerCost?.resetsAt == Self.date("2026-09-01T00:00:00Z"))
         #expect(result.usage.identity?.accountID == "fixture-user")
         #expect(result.usage.identity?.accountEmail == "fixture@example.com")
         #expect(result.usage.details.count == 2)
         #expect(result.usage.dataConfidence == .exact)
-        #expect(await recorder.count == .zero)
-        #expect(await apiTransport.requests().count == 2)
-        #expect(await webTransport.requests().isEmpty)
+        guard case .localMatchComposed = result.huggingFaceWalletOutcome else {
+            Issue.record("Expected a local match composition outcome")
+            return
+        }
+
+        // The plugin transport carries only billing; the identity service performs the single
+        // bearer whoami. One billing page and one browser whoami complete the batch.
+        let apiRequests = await apiTransport.requests()
+        #expect(apiRequests.map { $0.url?.path } == ["/api/settings/billing/usage"])
+        let identityRequests = await identityTransport.requests()
+        #expect(identityRequests.count == 2)
+        #expect(identityRequests.first { $0.value(forHTTPHeaderField: "Authorization") != nil }
+            .map { $0.value(forHTTPHeaderField: "Authorization") } == "Bearer hf_fixture_token")
+        #expect(identityRequests.first { $0.value(forHTTPHeaderField: "Cookie") != nil }
+            .map { $0.value(forHTTPHeaderField: "Cookie") } == "session=fixture")
+        #expect(await webTransport.requests().count == 1)
+        #expect(await recorder.count == 1)
     }
 
     @Test
-    func `auto with API never consults the browser wallet for either optional usage preference`() async throws {
+    func `auto retrieves the wallet regardless of the optional usage preference`() async throws {
         for includeOptionalUsage in [false, true] {
             let recorder = HuggingFaceCookieResolutionRecorder()
             let webTransport = Self.walletTransport(balance: 9.25)
@@ -587,46 +598,84 @@ struct HuggingFaceUsageStatsTests {
                     resolveCookieHeader: { _ in
                         await recorder.record()
                         return "session=fixture"
-                    }))
+                    }),
+                identityService: Self.identityService())
             let result = try await auto.fetch(Self.fetchContext(
                 sourceMode: .auto,
                 environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
                 settings: Self.manualCookieSettings(),
                 includeOptionalUsage: includeOptionalUsage))
 
+            // The prepaid wallet is required product data in Auto, not generic optional usage.
             #expect(result.usage.providerCost?.used == 2.41)
-            #expect(result.usage.providerCost?.balance == nil)
-            #expect(result.usage.identity?.accountID == "fixture-user")
-            #expect(await recorder.count == .zero)
-            #expect(await webTransport.requests().isEmpty)
+            #expect(result.usage.providerCost?.balance == 9.25)
+            #expect(await recorder.count == 1)
+            #expect(await webTransport.requests().count == 1)
         }
     }
 
     @Test
-    func `auto with API keeps an unchanged API snapshot instead of adopting a wallet balance`() async throws {
-        let recorder = HuggingFaceCookieResolutionRecorder()
-        let webTransport = Self.walletTransport(balance: 0)
+    func `auto with API keeps the API snapshot unmodified when identities mismatch`() async throws {
+        let webTransport = Self.walletTransport(balance: 9.25)
         let auto = HuggingFaceAutoFetchStrategy(
             apiStrategy: Self.apiStrategy(transport: Self.transport()),
             webStrategy: HuggingFaceWebFetchStrategy(
                 transport: webTransport,
-                resolveCookieHeader: { _ in
-                    await recorder.record()
-                    return "session=fixture"
-                }))
+                resolveCookieHeader: { _ in "session=fixture" }),
+            identityService: Self.identityService(
+                bearerBody: Self.matchedProfileFixture,
+                browserBody: Self.otherUserProfileFixture))
+
         let result = try await auto.fetch(Self.fetchContext(
             sourceMode: .auto,
             environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
             settings: Self.manualCookieSettings()))
 
+        // Fail closed for composition: the API snapshot is untouched and the wallet is
+        // published once at provider level as unverified browser-session data.
+        #expect(result.sourceLabel == "api")
         #expect(result.usage.providerCost?.used == 2.41)
         #expect(result.usage.providerCost?.balance == nil)
-        #expect(await recorder.count == .zero)
-        #expect(await webTransport.requests().isEmpty)
+        #expect(result.usage.providerCost?.balanceUpdatedAt == nil)
+        #expect(result.usage.identity?.accountID == "fixture-user")
+        #expect(result.usage.details.count == 2)
+        guard case let .providerLevel(publication) = result.huggingFaceWalletOutcome else {
+            Issue.record("Expected a provider-level wallet outcome")
+            return
+        }
+        #expect(publication.balanceUSD == 9.25)
+        #expect(publication.attribution == .unverified)
     }
 
     @Test
-    func `auto with API does not fall back to web when the API fetch fails`() async throws {
+    func `auto with API keeps the API snapshot unmodified when identity is unverifiable`() async throws {
+        for browserBody in [#"{"name":"no-type","id":"fixture-opaque-id"}"#, #"{"error":"denied"}"#] {
+            let webTransport = Self.walletTransport(balance: 4.5)
+            let auto = HuggingFaceAutoFetchStrategy(
+                apiStrategy: Self.apiStrategy(transport: Self.transport()),
+                webStrategy: HuggingFaceWebFetchStrategy(
+                    transport: webTransport,
+                    resolveCookieHeader: { _ in "session=fixture" }),
+                identityService: Self.identityService(browserBody: browserBody))
+
+            let result = try await auto.fetch(Self.fetchContext(
+                sourceMode: .auto,
+                environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+                settings: Self.manualCookieSettings()))
+
+            #expect(result.sourceLabel == "api")
+            #expect(result.usage.providerCost?.balance == nil)
+            guard case let .providerLevel(publication) = result.huggingFaceWalletOutcome else {
+                Issue.record("Expected a provider-level wallet outcome")
+                return
+            }
+            #expect(publication.balanceUSD == 4.5)
+            #expect(publication.attribution == .unverified)
+        }
+    }
+
+    @Test
+    func `auto with API reports unavailable and never falls back to web when the API fetch fails`() async throws {
         let recorder = HuggingFaceCookieResolutionRecorder()
         let webTransport = Self.walletTransport(balance: 7.5)
         let failingAPI = ProviderHTTPTransportStub { _ in
@@ -639,7 +688,8 @@ struct HuggingFaceUsageStatsTests {
                 resolveCookieHeader: { _ in
                     await recorder.record()
                     return "session=fixture"
-                }))
+                }),
+            identityService: Self.identityService())
         let context = Self.fetchContext(
             sourceMode: .auto,
             environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
@@ -654,6 +704,82 @@ struct HuggingFaceUsageStatsTests {
         }
         #expect(await recorder.count == .zero)
         #expect(await webTransport.requests().isEmpty)
+    }
+
+    @Test
+    func `auto keeps the API snapshot and clears the wallet outcome when the wallet is unavailable`() async throws {
+        let recorder = HuggingFaceCookieResolutionRecorder()
+        let expiredTransport = ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            return try Self.htmlResponse(url: url, body: "<html></html>", statusCode: 403)
+        }
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: expiredTransport,
+                resolveCookieHeader: { _ in
+                    await recorder.record()
+                    return "session=fixture"
+                }),
+            identityService: Self.identityService())
+
+        let result = try await auto.fetch(Self.fetchContext(
+            sourceMode: .auto,
+            environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+            settings: Self.manualCookieSettings()))
+
+        #expect(result.sourceLabel == "api")
+        #expect(result.usage.providerCost?.used == 2.41)
+        #expect(result.usage.providerCost?.balance == nil)
+        #expect(result.huggingFaceWalletOutcome == .unavailable)
+        #expect(await recorder.count == 1)
+    }
+
+    @Test
+    func `auto reuses one bearer identity request across consecutive fetches`() async throws {
+        let identityTransport = Self.identityTransport()
+        let service = HuggingFaceIdentityService(transport: identityTransport)
+        for _ in 0..<2 {
+            let auto = HuggingFaceAutoFetchStrategy(
+                apiStrategy: Self.apiStrategy(transport: Self.transport()),
+                webStrategy: HuggingFaceWebFetchStrategy(
+                    transport: Self.walletTransport(balance: 9.25),
+                    resolveCookieHeader: { _ in "session=fixture" }),
+                identityService: service)
+            let result = try await auto.fetch(Self.fetchContext(
+                sourceMode: .auto,
+                environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+                settings: Self.manualCookieSettings()))
+            #expect(result.usage.providerCost?.balance == 9.25)
+        }
+
+        let requests = await identityTransport.requests()
+        // One bearer whoami per credential cache miss; the browser identity is probed once
+        // per cookie credential across the batch of fetches.
+        #expect(requests.count(where: {
+            $0.value(forHTTPHeaderField: "Authorization")?.hasPrefix("Bearer ") == true
+        }) == 1)
+        #expect(requests.count(where: { $0.value(forHTTPHeaderField: "Cookie") != nil }) == 1)
+    }
+
+    @Test
+    func `auto wallet fetch cancellation propagates`() async throws {
+        let webTransport = ProviderHTTPTransportStub { _ in
+            throw CancellationError()
+        }
+        let auto = HuggingFaceAutoFetchStrategy(
+            apiStrategy: Self.apiStrategy(transport: Self.transport()),
+            webStrategy: HuggingFaceWebFetchStrategy(
+                transport: webTransport,
+                resolveCookieHeader: { _ in "session=fixture" }),
+            identityService: Self.identityService())
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await auto.fetch(Self.fetchContext(
+                sourceMode: .auto,
+                environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
+                settings: Self.manualCookieSettings()))
+        }
     }
 
     @Test
@@ -720,7 +846,8 @@ struct HuggingFaceUsageStatsTests {
             webStrategy: HuggingFaceWebFetchStrategy(resolveCookieHeader: { _ in
                 await recorder.record()
                 return "session=fixture"
-            }))
+            }),
+            identityService: Self.identityService())
         let result = try await auto.fetch(Self.fetchContext(
             sourceMode: .auto,
             environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"],
@@ -728,6 +855,7 @@ struct HuggingFaceUsageStatsTests {
 
         #expect(result.usage.providerCost?.used == 2.41)
         #expect(result.usage.providerCost?.balance == nil)
+        #expect(result.huggingFaceWalletOutcome == .notAttempted)
         #expect(await recorder.count == .zero)
     }
 
@@ -790,12 +918,51 @@ struct HuggingFaceUsageStatsTests {
             apiStrategy: Self.apiStrategy(transport: Self.transport()),
             webStrategy: HuggingFaceWebFetchStrategy(
                 transport: Self.walletTransport(balance: 7.5),
-                resolveCookieHeader: { _ in "session=fixture" }))
+                resolveCookieHeader: { _ in "session=fixture" }),
+            identityService: Self.identityService())
         let context = context ?? Self.fetchContext(
             sourceMode: .auto,
             settings: Self.manualCookieSettings())
         #expect(await cookieOnly.isAvailable(context))
         return try await cookieOnly.fetch(context)
+    }
+
+    /// Matched identity fixtures carry the opaque `type: "user"` and `id` fields required by the
+    /// FP-193 matching contract. The same fixture serves both authorities so a local match can
+    /// compose; tests override one side to force a mismatch or unverifiable identity.
+    private static let matchedProfileFixture =
+        #"{"type":"user","id":"fixture-opaque-id","name":"fixture-user","email":"fixture@example.com","isPro":true}"#
+
+    private static let otherUserProfileFixture =
+        #"{"type":"user","id":"other-user-opaque-id","name":"other-user","email":"other@example.com"}"#
+
+    private static func identityService(
+        bearerBody: String = Self.matchedProfileFixture,
+        browserBody: String = Self.matchedProfileFixture,
+        status: Int = 200) -> HuggingFaceIdentityService
+    {
+        HuggingFaceIdentityService(transport: self.identityTransport(
+            bearerBody: bearerBody,
+            browserBody: browserBody,
+            status: status))
+    }
+
+    private static func identityTransport(
+        bearerBody: String = Self.matchedProfileFixture,
+        browserBody: String = Self.matchedProfileFixture,
+        status: Int = 200) -> ProviderHTTPTransportStub
+    {
+        ProviderHTTPTransportStub { request in
+            let url = try #require(request.url)
+            guard url.path == "/api/whoami-v2" else {
+                throw ProviderPluginError.script("Unexpected Hugging Face identity fixture path: \(url.path)")
+            }
+            let isBearer = request.value(forHTTPHeaderField: "Authorization")?.hasPrefix("Bearer ") == true
+            return try Self.response(
+                url: url,
+                body: isBearer ? bearerBody : browserBody,
+                statusCode: status)
+        }
     }
 
     /// Environments that must resolve without an API credential never rely on the developer machine's
@@ -932,26 +1099,7 @@ struct HuggingFaceUsageStatsTests {
 
 extension HuggingFaceUsageStatsTests {
     @Test(arguments: BundledPluginTestSupport.engines)
-    func `identity failures leave a valid billing snapshot available`(engine: ProviderPluginEngineKind) async throws {
-        let cases = [
-            (profileBody: #"{"error":"hf_fixture_token"}"#, profileStatus: 401),
-            (profileBody: #"{"error":"hf_fixture_token"}"#, profileStatus: 503),
-            (profileBody: #"{"name":123}"#, profileStatus: 200),
-        ]
-
-        for (profileBody, profileStatus) in cases {
-            let snapshot = try await Self.fetch(
-                engine: engine,
-                profileBody: profileBody,
-                profileStatus: profileStatus)
-            #expect(snapshot.providerCost?.used == 2.41)
-            #expect(snapshot.identity == nil)
-            #expect(snapshot.detailRow(label: "Reported spend")?.value == "$2.41")
-        }
-    }
-
-    @Test(arguments: BundledPluginTestSupport.engines)
-    func `billing refreshes on every fetch while identity is cached`(engine: ProviderPluginEngineKind) async throws {
+    func `plugin performs no identity probing and reports billing only`(engine: ProviderPluginEngineKind) async throws {
         let transport = Self.transport()
         let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
         let secrets = [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"]
@@ -959,71 +1107,24 @@ extension HuggingFaceUsageStatsTests {
         _ = try await runtime.fetchUsage(
             secrets: secrets,
             now: Date(timeIntervalSince1970: 1_777_000_000))
-        let second = try await runtime.fetchUsage(
+        _ = try await runtime.fetchUsage(
             secrets: secrets,
             now: Date(timeIntervalSince1970: 1_777_000_001))
         let requests = await transport.requests()
 
-        #expect(second.identity?.accountID == "fixture-user")
+        // Identity (whoami-v2) is owned by CodexBar's Swift-side identity service; the plugin
+        // fetches billing on every refresh and never contacts the identity endpoint.
         #expect(requests.map { $0.url?.path } == [
             "/api/settings/billing/usage",
-            "/api/whoami-v2",
             "/api/settings/billing/usage",
         ])
+        #expect(requests.allSatisfy { $0.url?.path != "/api/whoami-v2" })
     }
 
     @Test(arguments: BundledPluginTestSupport.engines)
-    func `identity cache is isolated when the bearer token changes`(engine: ProviderPluginEngineKind) async throws {
-        let transport = Self.transport()
-        let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
-
-        _ = try await runtime.fetchUsage(
-            secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_first_token"],
-            now: Date(timeIntervalSince1970: 1_777_000_000))
-        _ = try await runtime.fetchUsage(
-            secrets: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_second_token"],
-            now: Date(timeIntervalSince1970: 1_777_000_001))
-        let requests = await transport.requests()
-
-        #expect(requests.map { $0.url?.path } == [
-            "/api/settings/billing/usage",
-            "/api/whoami-v2",
-            "/api/settings/billing/usage",
-            "/api/whoami-v2",
-        ])
-        #expect(requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
-            "Bearer hf_first_token",
-            "Bearer hf_first_token",
-            "Bearer hf_second_token",
-            "Bearer hf_second_token",
-        ])
-    }
-
-    @Test(arguments: BundledPluginTestSupport.engines)
-    func `failed identity refreshes are not cached`(engine: ProviderPluginEngineKind) async throws {
-        let transports = [
-            Self.transport(profileStatus: 503),
-            Self.transport(profileBody: #"{"name":123}"#),
-        ]
-        let secrets = [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"]
-
-        for transport in transports {
-            let runtime = try BundledPluginTestSupport.runtime("huggingface", engine: engine, transport: transport)
-            for _ in 0..<2 {
-                let snapshot = try await runtime.fetchUsage(
-                    secrets: secrets,
-                    now: Date(timeIntervalSince1970: 1_777_000_000))
-                #expect(snapshot.providerCost?.used == 2.41)
-                #expect(snapshot.identity == nil)
-            }
-            let requests = await transport.requests()
-            #expect(requests.count(where: { $0.url?.path == "/api/settings/billing/usage" }) == 2)
-            #expect(requests.count(where: { $0.url?.path == "/api/whoami-v2" }) == 2)
-        }
-    }
-
-    @Test(arguments: BundledPluginTestSupport.engines)
-    func `billing remains authoritative when a cached identity exists`(engine: ProviderPluginEngineKind) async throws {
+    func `billing remains authoritative across consecutive plugin refreshes`(
+        engine: ProviderPluginEngineKind) async throws
+    {
         let statuses = HuggingFaceHTTPStatusSequence([200, 401])
         let transport = ProviderHTTPTransportStub { request in
             let url = try #require(request.url)
@@ -1034,8 +1135,6 @@ extension HuggingFaceUsageStatsTests {
                     url: url,
                     body: status == 200 ? Self.billingFixture : #"{"error":"hf_fixture_token"}"#,
                     statusCode: status)
-            case "/api/whoami-v2":
-                return try Self.response(url: url, body: Self.profileFixture, statusCode: 200)
             default:
                 throw ProviderPluginError.script("Unexpected Hugging Face fixture path: \(url.path)")
             }
@@ -1058,7 +1157,6 @@ extension HuggingFaceUsageStatsTests {
         let requests = await transport.requests()
         #expect(requests.map { $0.url?.path } == [
             "/api/settings/billing/usage",
-            "/api/whoami-v2",
             "/api/settings/billing/usage",
         ])
     }
@@ -1069,11 +1167,11 @@ extension HuggingFaceUsageStatsTests {
         let context = Self.fetchContext(
             environment: [HuggingFaceSettingsReader.tokenEnvironmentKey: "hf_fixture_token"])
         let first = try #require(
-            await descriptor.fetchPlan.pipeline.resolveStrategies(context).first as? ScriptFetchStrategy)
+            await descriptor.fetchPlan.pipeline.resolveStrategies(context).first as? HuggingFaceAPIUsageStrategy)
         let second = try #require(
-            await descriptor.fetchPlan.pipeline.resolveStrategies(context).first as? ScriptFetchStrategy)
+            await descriptor.fetchPlan.pipeline.resolveStrategies(context).first as? HuggingFaceAPIUsageStrategy)
 
-        #expect(first === second)
+        #expect(first.inner === second.inner)
     }
 
     private static func fetch(

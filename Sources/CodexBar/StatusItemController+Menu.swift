@@ -724,6 +724,10 @@ extension StatusItemController {
                         accountSnapshot: accountSnapshot)
                 }
             self.addStackedMenuCards(cards, to: menu, context: context)
+            self.addHuggingFaceProviderWalletSection(
+                to: menu,
+                provider: context.currentProvider,
+                width: context.menuWidth)
             self.addFleetAccountMenuCards(fleetProjection.additionalAccounts, to: menu, context: context)
             return false
         }
