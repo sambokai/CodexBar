@@ -6,6 +6,23 @@ import Foundation
 // stacked-batch attribution post-pass. The wallet is never cached as a token-account snapshot.
 
 extension UsageStore {
+    /// Reconciles Hugging Face's provider-level Web wallet before refresh routing branches into
+    /// stacked fan-out or ordinary selected-account reconciliation. Explicit Web never displaces
+    /// its own live snapshot, explicit API clears Web authority, and only Auto with an effective
+    /// selected token account can begin an API replacement that may need failure recovery.
+    func prepareHuggingFaceWalletRefresh(
+        provider: UsageProvider,
+        context: ProviderFetchContext,
+        selectedTokenAccount: ProviderTokenAccount?)
+    {
+        self.reconcileHuggingFaceWalletEligibility(provider: provider, context: context)
+        guard provider == .huggingface,
+              context.sourceMode == .auto,
+              selectedTokenAccount != nil
+        else { return }
+        self.beginHuggingFaceWebSnapshotDisplacement(provider: provider)
+    }
+
     func applyHuggingFaceWalletOutcome(provider: UsageProvider, result: ProviderFetchResult) {
         // Provider-specific by design: Hugging Face publishes one provider-level browser wallet.
         guard provider == .huggingface else { return }
@@ -125,8 +142,8 @@ extension UsageStore {
     /// pending displacement when the API replacement begins and only this narrow transition
     /// consumes it:
     ///
-    /// * `begin` runs when the token-account fan-out (or the single-account path) starts an
-    ///   Auto/API replacement while the recorded Web snapshot is live: the replacement displaces
+    /// * `begin` runs before token-account routing starts an Auto replacement while the recorded
+    ///   Web snapshot is live: the replacement displaces
     ///   the Web-owned live snapshot by definition, so `begin` arms the pending flag;
     /// * the failure-path call publishes the recorded wallet once at provider level **only when
     ///   the pending displacement is armed**. A failed Web refresh, a cancellation, or a failure

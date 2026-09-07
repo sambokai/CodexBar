@@ -75,6 +75,46 @@ struct HuggingFaceMenuWalletPresentationTests {
         #expect(ids.count(where: { $0.hasPrefix("menuCard-") }) == 2)
     }
 
+    @Test
+    func `detached compact construction puts wallet only in scratch menu`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-detached-compact", accountCount: 5)
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 9.25,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .unverified)
+        let liveMenu = NSMenu()
+        let scratch = NSMenu()
+
+        try fixture.controller.addSwitcherScopedMenuContent(
+            into: scratch,
+            captureMenu: liveMenu,
+            context: Self.makeMenuUpdateContext(fixture: fixture))
+
+        #expect(Self.menuCardItemIDs(scratch).count(where: { $0 == "huggingFaceBrowserWallet" }) == 1)
+        #expect(!Self.menuCardItemIDs(liveMenu).contains("huggingFaceBrowserWallet"))
+    }
+
+    @Test
+    func `compact smart reconciliation adds retains and removes wallet exactly once`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-smart-compact", accountCount: 5)
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 9.25,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .unverified)
+        let menu = NSMenu()
+        let context = try Self.makeMenuUpdateContext(fixture: fixture)
+
+        fixture.controller.updateMenuContentPreservingSwitcher(menu, context: context)
+        #expect(Self.menuCardItemIDs(menu).count(where: { $0 == "huggingFaceBrowserWallet" }) == 1)
+
+        fixture.controller.updateMenuContentPreservingSwitcher(menu, context: context)
+        #expect(Self.menuCardItemIDs(menu).count(where: { $0 == "huggingFaceBrowserWallet" }) == 1)
+
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = nil
+        fixture.controller.updateMenuContentPreservingSwitcher(menu, context: context)
+        #expect(!Self.menuCardItemIDs(menu).contains("huggingFaceBrowserWallet"))
+    }
+
     // MARK: Live-card surface with a nil base snapshot
 
     @Test
@@ -140,18 +180,22 @@ struct HuggingFaceMenuWalletPresentationTests {
     // MARK: Displacement-provenance recovery matrix
 
     @Test
-    func `web success then web failure keeps exactly one wallet and no auxiliary duplicate`() async throws {
+    func `explicit web failure never arms or recovers an auxiliary wallet`() async throws {
         let settings = Self.makeSettings(suite: "hf-menu-web-failure")
         settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
-        let store = try Self.makeStore(settings: settings, failingAPI: false)
+        let webFailure = Self.failingAPIFlag()
+        let store = try Self.makeStore(settings: settings, failingAPI: false, webFailureFlag: webFailure)
 
         await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
         #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
 
         // A later explicit-Web failure must not duplicate the recorded wallet into auxiliary state.
+        webFailure.setFailing(true)
         await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
-        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
         #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        #expect(store.huggingFaceWebOwnedWallets[.huggingface]?.balanceUSD == 42)
+        #expect(store.huggingFaceLiveWebSnapshotOwners == [.huggingface])
+        #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
     }
 
     @Test
@@ -165,7 +209,7 @@ struct HuggingFaceMenuWalletPresentationTests {
 
         await store.refreshProvider(.huggingface)
         await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
-        await failure.setFailing(true)
+        failure.setFailing(true)
         await store.refreshProvider(.huggingface)
 
         let publication = try #require(store.huggingFaceBrowserWallets[.huggingface])
@@ -174,17 +218,15 @@ struct HuggingFaceMenuWalletPresentationTests {
     }
 
     @Test
-    func `web success then auto failure without cached snapshot renders the wallet on the live card`() async throws {
+    func `selected account web success then auto failure without cache recovers one wallet`() async throws {
         let settings = Self.makeSettings(suite: "hf-menu-auto-failure-uncached")
-        settings.multiAccountMenuLayout = .stacked
         settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
-        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
         let failure = Self.failingAPIFlag()
         let store = try Self.makeStore(settings: settings, failingAPI: false, apiFailureFlag: failure)
 
         await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
         #expect(store.huggingFaceLiveWebSnapshotOwners == [.huggingface])
-        await failure.setFailing(true)
+        failure.setFailing(true)
         await store.refreshProvider(.huggingface)
 
         let publication = try #require(store.huggingFaceBrowserWallets[.huggingface])
@@ -206,11 +248,28 @@ struct HuggingFaceMenuWalletPresentationTests {
     }
 
     @Test
-    func `web success then auto success clears the recovery state`() async throws {
-        let settings = Self.makeSettings(suite: "hf-menu-auto-success")
-        settings.multiAccountMenuLayout = .stacked
+    func `segmented uncached selection recovers one wallet after auto failure`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-auto-failure-segmented")
+        settings.multiAccountMenuLayout = .segmented
         settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
         settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let failure = Self.failingAPIFlag()
+        let store = try Self.makeStore(settings: settings, failingAPI: false, apiFailureFlag: failure)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        failure.setFailing(true)
+        await store.refreshProvider(.huggingface)
+
+        let publication = try #require(store.huggingFaceBrowserWallets[.huggingface])
+        #expect(publication.balanceUSD == 42)
+        #expect(publication.attribution == .webSession)
+        #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
+    }
+
+    @Test
+    func `web success then auto success clears the recovery state`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-auto-success")
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
         let store = try Self.makeStore(settings: settings, failingAPI: false)
 
         await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
@@ -220,6 +279,24 @@ struct HuggingFaceMenuWalletPresentationTests {
         #expect(store.huggingFaceWebOwnedWallets[.huggingface] == nil)
         #expect(store.huggingFaceLiveWebSnapshotOwners.isEmpty)
         #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
+    }
+
+    @Test
+    func `auto without selected token never displaces a failing web refresh`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-auto-no-token")
+        let webFailure = Self.failingAPIFlag()
+        let store = try Self.makeStore(settings: settings, failingAPI: false, webFailureFlag: webFailure)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+        webFailure.setFailing(true)
+        await store.refreshProvider(.huggingface)
+
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        #expect(store.huggingFaceLiveWebSnapshotOwners == [.huggingface])
+        #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
+        #expect(store.huggingFaceWebOwnedWallets[.huggingface]?.balanceUSD == 42)
     }
 
     @Test
@@ -235,7 +312,7 @@ struct HuggingFaceMenuWalletPresentationTests {
 
         // Explicit API configuration replaces the browser snapshot with the API authority.
         settings.huggingFaceUsageDataSource = .api
-        await failure.setFailing(true)
+        failure.setFailing(true)
         await store.refreshProvider(.huggingface)
 
         #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
@@ -354,6 +431,23 @@ struct HuggingFaceMenuWalletPresentationTests {
         return menu
     }
 
+    private static func makeMenuUpdateContext(fixture: Fixture) throws -> StatusItemController.MenuUpdateContext {
+        let display = try #require(fixture.controller.tokenAccountMenuDisplay(for: .huggingface))
+        return StatusItemController.MenuUpdateContext(
+            provider: .huggingface,
+            currentProvider: .huggingface,
+            switcherSelection: .provider(.huggingface),
+            menuWidth: StatusItemController.menuCardBaseWidth,
+            codexAccountDisplay: nil,
+            tokenAccountDisplay: display,
+            openAIContext: fixture.controller.openAIWebContext(
+                currentProvider: .huggingface,
+                showAllAccounts: true),
+            descriptor: fixture.controller.makeMenuDescriptor(
+                provider: .huggingface,
+                includeContextualActions: true))
+    }
+
     private static func menuCardItemIDs(_ menu: NSMenu) -> [String] {
         menu.items.compactMap { $0.representedObject as? String }
             .filter { $0.hasPrefix("tokenAccount") || $0.hasPrefix("menuCard") || $0 == "huggingFaceBrowserWallet" }
@@ -444,6 +538,7 @@ struct HuggingFaceMenuWalletPresentationTests {
     }
 
     private struct WebStubStrategy: ProviderFetchStrategy {
+        let failureFlag: APIFailureFlag
         let id = "huggingface-web-stub"
         let kind: ProviderFetchKind = .web
 
@@ -452,6 +547,9 @@ struct HuggingFaceMenuWalletPresentationTests {
         }
 
         func fetch(_: ProviderFetchContext) async throws -> ProviderFetchResult {
+            guard !self.failureFlag.isFailing else {
+                throw ProviderPluginError.script("fixture Web outage")
+            }
             let observedAt = Date(timeIntervalSince1970: 1_777_000_000)
             let cost = ProviderCostSnapshot(
                 used: 0,
@@ -514,7 +612,8 @@ struct HuggingFaceMenuWalletPresentationTests {
     private static func makeStore(
         settings: SettingsStore,
         failingAPI: Bool,
-        apiFailureFlag: APIFailureFlag? = nil) throws -> UsageStore
+        apiFailureFlag: APIFailureFlag? = nil,
+        webFailureFlag: APIFailureFlag? = nil) throws -> UsageStore
     {
         let store = UsageStore(
             fetcher: UsageFetcher(environment: [:]),
@@ -527,7 +626,8 @@ struct HuggingFaceMenuWalletPresentationTests {
         let flag = apiFailureFlag ?? APIFailureFlag()
         flag.setFailing(failingAPI)
         let apiStub = APIStubStrategy(failureFlag: flag)
-        let webStub = WebStubStrategy()
+        let webFlag = webFailureFlag ?? APIFailureFlag()
+        let webStub = WebStubStrategy(failureFlag: webFlag)
         store.providerSpecs[.huggingface] = ProviderSpec(
             style: baseSpec.style,
             isEnabled: { true },
@@ -541,6 +641,8 @@ struct HuggingFaceMenuWalletPresentationTests {
                     pipeline: ProviderFetchPipeline { context in
                         switch context.sourceMode {
                         case .web:
+                            [webStub]
+                        case .auto where context.selectedTokenAccountID == nil:
                             [webStub]
                         default:
                             [apiStub]
