@@ -31,9 +31,13 @@ public struct HuggingFaceIdentity: Equatable, Sendable {
 ///
 /// Successful identities are cached in memory for 12 hours keyed by a one-way credential
 /// fingerprint (`CookieHeaderCache.credentialFingerprint`), never by the raw token or cookie
-/// header. Failures are not cached so a transient identity outage retries on the next refresh.
-/// Cancellation always propagates; every other failure resolves to `nil` ("identity
-/// unavailable") because billing never depends on identity.
+/// header. Identical in-flight lookups are coalesced by the same fingerprint key, so concurrent
+/// callers race one shared `whoami-v2` request per cache miss instead of one request each.
+/// Failures are not cached so a transient identity outage retries on the next refresh.
+/// Cancellation always propagates: a cancelled waiter rethrows `CancellationError` after the
+/// shared operation settles, without duplicating requests or discarding the shared success for
+/// other callers. Every non-cancellation failure resolves to `nil` ("identity unavailable")
+/// because billing never depends on identity.
 public actor HuggingFaceIdentityService {
     static let cacheTTLSeconds: TimeInterval = 12 * 60 * 60
 
@@ -46,6 +50,7 @@ public actor HuggingFaceIdentityService {
 
     private let transport: any ProviderHTTPTransport
     var cache: [String: CacheEntry] = [:]
+    private var inFlight: [String: HuggingFaceSingleFlight<HuggingFaceIdentity?>] = [:]
 
     public init(transport: any ProviderHTTPTransport = ProviderHTTPClient.shared) {
         self.transport = transport
@@ -91,12 +96,35 @@ public actor HuggingFaceIdentityService {
             return entry.identity
         }
 
-        let identity: HuggingFaceIdentity?
+        // Coalesce identical in-flight lookups by the fingerprint key: concurrent callers join
+        // one shared `whoami-v2` operation instead of racing duplicate requests.
+        let operation: HuggingFaceSingleFlight<HuggingFaceIdentity?>
+        if let inFlight = self.inFlight[cacheKey] {
+            operation = inFlight
+        } else {
+            operation = HuggingFaceSingleFlight(task: Task.detached(priority: .userInitiated) {
+                try await self.requestIdentity(
+                    headerField: headerField,
+                    headerValue: headerValue,
+                    timeout: timeout)
+            })
+            self.inFlight[cacheKey] = operation
+        }
+
+        let outcome: Result<HuggingFaceIdentity?, any Error>
         do {
-            identity = try await self.requestIdentity(
-                headerField: headerField,
-                headerValue: headerValue,
-                timeout: timeout)
+            outcome = try await .success(operation.task.value)
+        } catch {
+            outcome = .failure(error)
+        }
+        self.finish(cacheKey: cacheKey, operation: operation, outcome: outcome)
+        // A cancelled waiter follows the caller's cancellation contract: the shared outcome is
+        // still recorded above, but this caller propagates cancellation instead of consuming it.
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        do {
+            return try outcome.get()
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as URLError where error.code == .cancelled {
@@ -106,11 +134,22 @@ public actor HuggingFaceIdentityService {
             // resolve to "identity unavailable".
             return nil
         }
-        guard let identity else { return nil }
+    }
+
+    /// Records the shared operation's outcome exactly once per generation. Success caches the
+    /// identity for the TTL; failures only clear the in-flight entry so a later lookup is a
+    /// fresh miss. The generation check keeps a slow waiter from clearing a newer operation.
+    private func finish(
+        cacheKey: String,
+        operation: HuggingFaceSingleFlight<HuggingFaceIdentity?>,
+        outcome: Result<HuggingFaceIdentity?, any Error>)
+    {
+        guard self.inFlight[cacheKey] === operation else { return }
+        self.inFlight[cacheKey] = nil
+        guard case let .success(identity) = outcome, let identity else { return }
         self.cache[cacheKey] = CacheEntry(
             identity: identity,
             expiresAt: Date().addingTimeInterval(Self.cacheTTLSeconds))
-        return identity
     }
 
     private func requestIdentity(
