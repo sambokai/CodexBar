@@ -713,6 +713,10 @@ extension StatusItemController {
                 context: context)
             {
                 self.addFleetAccountMenuCards(fleetProjection.additionalAccounts, to: menu, context: context)
+                self.addHuggingFaceProviderWalletSection(
+                    to: captureMenu ?? menu,
+                    provider: context.currentProvider,
+                    width: context.menuWidth)
                 return false
             }
             let accountSnapshots = tokenAccountDisplay.snapshots

@@ -18,10 +18,17 @@ extension UsageStore {
             self.huggingFaceWebOwnedWallets[provider.instanceID] = HuggingFaceWalletSnapshot(
                 balanceUSD: balance,
                 observedAt: result.usage.providerCost?.balanceUpdatedAt ?? result.usage.updatedAt)
+            self.huggingFaceLiveWebSnapshotOwners.insert(provider.instanceID)
             return
         }
-        // API-kind success: every non-failure outcome supersedes any recorded Web-owned wallet.
+        // API-kind success: every non-failure outcome supersedes any recorded Web-owned wallet and
+        // any pending displacement. Source labels are the deterministic owner: Web-kind successes
+        // keep the live-Web marker; anything else clears it. A Web-kind success that carries no
+        // balance (e.g. a degraded snapshot) also clears the stale record so it can never
+        // resurrect an older wallet.
         self.huggingFaceWebOwnedWallets[provider.instanceID] = nil
+        self.huggingFaceLiveWebSnapshotOwners.remove(provider.instanceID)
+        self.huggingFacePendingWebSnapshotDisplacement.remove(provider.instanceID)
         // Deterministic publication rules for the provider-level browser wallet:
         // composed → clear (the wallet lives on the matching account card);
         // observed → publish fresh; unavailable/notAttempted → clear. A nil outcome (API failure
@@ -46,6 +53,8 @@ extension UsageStore {
         if !HuggingFaceBrowserWalletPolicy.isWalletEligible(context) || context.sourceMode == .api {
             self.huggingFaceBrowserWallets[provider.instanceID] = nil
             self.huggingFaceWebOwnedWallets[provider.instanceID] = nil
+            self.huggingFaceLiveWebSnapshotOwners.remove(provider.instanceID)
+            self.huggingFacePendingWebSnapshotDisplacement.remove(provider.instanceID)
         }
     }
 
@@ -92,31 +101,62 @@ extension UsageStore {
         }
 
         // Apply the batch-authoritative publication decision. Every superseding decision also
-        // clears the recorded Web-owned wallet; only failure transitions preserve it.
+        // clears the recorded Web-owned wallet and its live marker; only failure transitions
+        // preserve them.
         switch reconciled.decision {
         case .composedOnAccount, .clear:
             self.huggingFaceBrowserWallets[.huggingface] = nil
             self.huggingFaceWebOwnedWallets[.huggingface] = nil
+            self.huggingFaceLiveWebSnapshotOwners.remove(.huggingface)
+            self.huggingFacePendingWebSnapshotDisplacement.remove(.huggingface)
         case let .providerLevel(publication):
             self.huggingFaceBrowserWallets[.huggingface] = publication
             self.huggingFaceWebOwnedWallets[.huggingface] = nil
+            self.huggingFaceLiveWebSnapshotOwners.remove(.huggingface)
+            self.huggingFacePendingWebSnapshotDisplacement.remove(.huggingface)
         case .noTransition:
             break
         }
         return rewritten
     }
 
-    /// Provider-specific by design (FP-194): a failed Auto/API refresh makes no wallet transition
-    /// of its own, but it can replace the visible Web snapshot with a wallet-less cached account
-    /// snapshot. When a validated browser wallet was published by a successful Web-kind refresh,
-    /// keep it visible once at provider level with `.webSession` attribution until the next
-    /// successful refresh supersedes it.
+    /// Provider-specific by design (FP-194): recovery publication for a failed Auto/API refresh
+    /// that provably displaced the validated Web-owned live snapshot. The store records the
+    /// pending displacement when the API replacement begins and only this narrow transition
+    /// consumes it:
+    ///
+    /// * `begin` runs when the token-account fan-out (or the single-account path) starts an
+    ///   Auto/API replacement while the recorded Web snapshot is live: the replacement displaces
+    ///   the Web-owned live snapshot by definition, so `begin` arms the pending flag;
+    /// * the failure-path call publishes the recorded wallet once at provider level **only when
+    ///   the pending displacement is armed**. A failed Web refresh, a cancellation, or a failure
+    ///   without a recorded-and-armed pending displacement makes no transition, so the Web
+    ///   snapshot can never duplicate its own wallet into auxiliary state.
+    ///
+    /// A successful replacement Auto/API result supersedes and clears the recovery state, and a
+    /// successful later Web result owns the wallet directly.
+    func beginHuggingFaceWebSnapshotDisplacement(provider: UsageProvider) {
+        // Provider-specific by design: only Hugging Face's Web-owned live snapshot can pend
+        // displacement for failure recovery.
+        guard provider == .huggingface,
+              self.huggingFaceWebOwnedWallets[provider.instanceID] != nil,
+              self.huggingFaceLiveWebSnapshotOwners.contains(provider.instanceID)
+        else { return }
+        self.huggingFaceLiveWebSnapshotOwners.remove(provider.instanceID)
+        self.huggingFacePendingWebSnapshotDisplacement.insert(provider.instanceID)
+    }
+
     func reconcileHuggingFaceWalletAfterFetchFailure(provider: UsageProvider, error: any Error) {
         // Provider-specific by design: Hugging Face is the only provider whose browser wallet can
         // outlive a failed refresh through this recovery publication.
         guard provider == .huggingface else { return }
         guard !Self.errorIsCancellation(error) else { return }
-        guard let wallet = self.huggingFaceWebOwnedWallets[provider.instanceID] else { return }
+        // Recovery requires actual displacement provenance: a pending Auto/API replacement must
+        // have started while the recorded Web snapshot was live. A failed Web refresh (which
+        // leaves the Web snapshot live) or an ineligible configuration never arms this.
+        guard self.huggingFacePendingWebSnapshotDisplacement.remove(provider.instanceID) != nil,
+              let wallet = self.huggingFaceWebOwnedWallets[provider.instanceID]
+        else { return }
         self.huggingFaceBrowserWallets[provider.instanceID] = HuggingFaceBrowserWalletPublication(
             balanceUSD: wallet.balanceUSD,
             observedAt: wallet.observedAt,

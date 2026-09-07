@@ -1,0 +1,553 @@
+import AppKit
+import CodexBarCore
+import Foundation
+import Testing
+@testable import CodexBar
+
+/// FP-194 remediation: the provider-level Hugging Face browser wallet must render exactly once in
+/// compact multi-account menus, stacked menus, and the live-card surface — including when no API
+/// base snapshot exists. All fixtures are synthetic; nothing here touches the browser, Keychain,
+/// or network.
+@MainActor
+@Suite(.serialized)
+struct HuggingFaceMenuWalletPresentationTests {
+    // MARK: Compact vs stacked live menus
+
+    @Test
+    func `compact layout renders one unverified provider wallet section`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-compact-unverified", accountCount: 5)
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 9.25,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .unverified)
+
+        let menu = try Self.makeMenu(fixture: fixture)
+        let ids = Self.menuCardItemIDs(menu)
+
+        // Compact layout shows the folded account rows plus exactly one provider wallet card.
+        #expect(ids.contains("huggingFaceBrowserWallet"))
+        #expect(ids.count(where: { $0 == "huggingFaceBrowserWallet" }) == 1)
+        #expect(!ids.contains(where: { $0.hasPrefix("menuCard-") }))
+        #expect(ids.contains(where: { $0.hasPrefix("tokenAccountCompact-") }))
+    }
+
+    @Test
+    func `compact layout renders one multi match provider wallet section`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-compact-multi-match", accountCount: 5)
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 9.25,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .multipleMatchingAccounts)
+
+        let menu = try Self.makeMenu(fixture: fixture)
+        let ids = Self.menuCardItemIDs(menu)
+
+        #expect(ids.count(where: { $0 == "huggingFaceBrowserWallet" }) == 1)
+    }
+
+    @Test
+    func `compact layout renders no provider wallet for a unique composition`() throws {
+        let fixture = try Self.makeFixture(
+            suite: "hf-menu-compact-composed",
+            accountCount: 5,
+            composedAccountIndex: 0)
+        #expect(fixture.store.huggingFaceBrowserWallets[.huggingface] == nil)
+
+        let menu = try Self.makeMenu(fixture: fixture)
+        let ids = Self.menuCardItemIDs(menu)
+
+        // The wallet lives on the matching account card; no provider-level duplicate may appear.
+        #expect(!ids.contains("huggingFaceBrowserWallet"))
+    }
+
+    @Test
+    func `stacked layout keeps rendering one provider wallet section`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-stacked-unverified", accountCount: 2)
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 9.25,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .unverified)
+
+        let menu = try Self.makeMenu(fixture: fixture)
+        let ids = Self.menuCardItemIDs(menu)
+
+        #expect(ids.count(where: { $0 == "huggingFaceBrowserWallet" }) == 1)
+        #expect(ids.count(where: { $0.hasPrefix("menuCard-") }) == 2)
+    }
+
+    // MARK: Live-card surface with a nil base snapshot
+
+    @Test
+    func `live card renders the recovery wallet on a carrier snapshot without an api snapshot`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-carrier", accountCount: 1, cachedSnapshot: false)
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 42,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .webSession)
+
+        let resolved = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
+            store: fixture.store,
+            controller: fixture.controller))
+        guard case let .assembled(model) = resolved else {
+            Issue.record("Expected the assembled live-card model")
+            return
+        }
+
+        // Exactly one browser-session wallet, carried by a snapshot that manufactures no API spend
+        // and no account identity.
+        let sections = model.providerDetails.filter { $0.title == "Browser session wallet" }
+        #expect(sections.count == 1)
+        #expect(sections[0].rows.map(\.value) == ["$42.00", "From browser session · API account not verified"])
+        #expect(model.providerCost?.spendLine == nil || !model.providerCost!.spendLine.contains("$"))
+    }
+
+    @Test
+    func `live card appends the wallet to an existing api snapshot`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-append", accountCount: 1)
+        fixture.store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 42,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .webSession)
+
+        let resolved = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
+            store: fixture.store,
+            controller: fixture.controller))
+        guard case let .assembled(model) = resolved else {
+            Issue.record("Expected the assembled live-card model")
+            return
+        }
+
+        let sections = model.providerDetails.filter { $0.title == "Browser session wallet" }
+        #expect(sections.count == 1)
+        #expect(model.providerCost != nil)
+    }
+
+    @Test
+    func `live card without a wallet publication renders no browser wallet section`() throws {
+        let fixture = try Self.makeFixture(suite: "hf-menu-no-wallet", accountCount: 1)
+        #expect(fixture.store.huggingFaceBrowserWallets[.huggingface] == nil)
+
+        let resolved = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
+            store: fixture.store,
+            controller: fixture.controller))
+        guard case let .assembled(model) = resolved else {
+            Issue.record("Expected the assembled live-card model")
+            return
+        }
+        #expect(!model.providerDetails.contains { $0.title == "Browser session wallet" })
+    }
+
+    // MARK: Displacement-provenance recovery matrix
+
+    @Test
+    func `web success then web failure keeps exactly one wallet and no auxiliary duplicate`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-web-failure")
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        let store = try Self.makeStore(settings: settings, failingAPI: false)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+
+        // A later explicit-Web failure must not duplicate the recorded wallet into auxiliary state.
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+    }
+
+    @Test
+    func `web success then auto failure with cached snapshot publishes one web session wallet`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-auto-failure-cached")
+        settings.multiAccountMenuLayout = .stacked
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let failure = Self.failingAPIFlag()
+        let store = try Self.makeStore(settings: settings, failingAPI: false, apiFailureFlag: failure)
+
+        await store.refreshProvider(.huggingface)
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        await failure.setFailing(true)
+        await store.refreshProvider(.huggingface)
+
+        let publication = try #require(store.huggingFaceBrowserWallets[.huggingface])
+        #expect(publication.balanceUSD == 42)
+        #expect(publication.attribution == .webSession)
+    }
+
+    @Test
+    func `web success then auto failure without cached snapshot renders the wallet on the live card`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-auto-failure-uncached")
+        settings.multiAccountMenuLayout = .stacked
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let failure = Self.failingAPIFlag()
+        let store = try Self.makeStore(settings: settings, failingAPI: false, apiFailureFlag: failure)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        #expect(store.huggingFaceLiveWebSnapshotOwners == [.huggingface])
+        await failure.setFailing(true)
+        await store.refreshProvider(.huggingface)
+
+        let publication = try #require(store.huggingFaceBrowserWallets[.huggingface])
+        #expect(publication.balanceUSD == 42)
+        #expect(publication.attribution == .webSession)
+
+        let resolved = try #require(Self.liveMenuModelFixture(store: store, controller: nil))
+        guard case let .projected(projected) = resolved else {
+            Issue.record("Expected the controller-less wallet projection")
+            return
+        }
+        #expect(projected.sections.count == 1)
+        #expect(projected.sections[0].rows.map(\.value) == [
+            "$42.00",
+            "From browser session · API account not verified",
+        ])
+        // The carrier manufactures no spend of its own.
+        #expect(projected.hasCost == false)
+    }
+
+    @Test
+    func `web success then auto success clears the recovery state`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-auto-success")
+        settings.multiAccountMenuLayout = .stacked
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let store = try Self.makeStore(settings: settings, failingAPI: false)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        await store.refreshProvider(.huggingface)
+
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        #expect(store.huggingFaceWebOwnedWallets[.huggingface] == nil)
+        #expect(store.huggingFaceLiveWebSnapshotOwners.isEmpty)
+        #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
+    }
+
+    @Test
+    func `web success then explicit api refresh never resurrects a web wallet`() async throws {
+        let settings = Self.makeSettings(suite: "hf-menu-api-clear")
+        settings.multiAccountMenuLayout = .stacked
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        let failure = Self.failingAPIFlag()
+        let store = try Self.makeStore(settings: settings, failingAPI: false, apiFailureFlag: failure)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+
+        // Explicit API configuration replaces the browser snapshot with the API authority.
+        settings.huggingFaceUsageDataSource = .api
+        await failure.setFailing(true)
+        await store.refreshProvider(.huggingface)
+
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        #expect(store.huggingFaceWebOwnedWallets[.huggingface] == nil)
+        #expect(store.huggingFaceLiveWebSnapshotOwners.isEmpty)
+        #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
+    }
+
+    @Test
+    func `cancellation after displacement manufactures no recovery transition`() {
+        let store = UsageStore(
+            fetcher: UsageFetcher(environment: [:]),
+            browserDetection: BrowserDetection(cacheTTL: 0),
+            settings: Self.makeSettings(suite: "hf-menu-cancellation"),
+            startupBehavior: .testing,
+            environmentBase: [:])
+        // Simulate a provisionally displaced Web-owned snapshot reached by cancellation.
+        store.huggingFaceWebOwnedWallets[.huggingface] = HuggingFaceWalletSnapshot(
+            balanceUSD: 42,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000))
+        store.huggingFacePendingWebSnapshotDisplacement = [.huggingface]
+
+        store.reconcileHuggingFaceWalletAfterFetchFailure(provider: .huggingface, error: CancellationError())
+
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+    }
+
+    // MARK: Fixtures
+
+    private struct Fixture {
+        let store: UsageStore
+        let controller: StatusItemController
+        let accounts: [ProviderTokenAccount]
+    }
+
+    private static func makeSettings(suite: String) -> SettingsStore {
+        testSettingsStore(
+            suiteName: "\(suite)-\(UUID().uuidString)",
+            tokenAccountStore: InMemoryTokenAccountStore())
+    }
+
+    private static func makeFixture(
+        suite: String,
+        accountCount: Int,
+        composedAccountIndex: Int? = nil,
+        cachedSnapshot: Bool = true) throws -> Fixture
+    {
+        let settings = Self.makeSettings(suite: suite)
+        settings.providerDetectionCompleted = true
+        settings.statusChecksEnabled = false
+        settings.refreshFrequency = .manual
+        settings.multiAccountMenuLayout = .stacked
+        for index in 0..<accountCount {
+            settings.addTokenAccount(
+                provider: .huggingface,
+                label: "Account \(index)",
+                token: "hf_menu_token_\(index)")
+        }
+        settings.setActiveTokenAccountIndex(0, for: .huggingface)
+        let accounts = settings.tokenAccounts(for: .huggingface)
+        let fetcher = UsageFetcher()
+        let store = UsageStore(
+            fetcher: fetcher,
+            browserDetection: BrowserDetection(cacheTTL: 0),
+            settings: settings,
+            startupBehavior: .testing,
+            environmentBase: [:])
+        for (index, account) in accounts.enumerated() {
+            let composed = composedAccountIndex == index
+            let cost = ProviderCostSnapshot(
+                used: 12,
+                limit: 0,
+                currencyCode: "USD",
+                period: "Reported billing period",
+                balance: composed ? 9.25 : nil,
+                updatedAt: Date())
+            let snapshot = UsageSnapshot(
+                primary: nil,
+                secondary: nil,
+                providerCost: cost,
+                updatedAt: Date(),
+                identity: nil)
+            let entry = TokenAccountUsageSnapshot(
+                account: account,
+                snapshot: cachedSnapshot ? snapshot : nil,
+                error: nil,
+                sourceLabel: composed ? "api+web" : "api",
+                cacheKey: store.tokenAccountSnapshotCacheKey(provider: .huggingface, account: account))
+            var snapshots = store.accountSnapshots[.huggingface] ?? []
+            snapshots.append(entry)
+            store.accountSnapshots[.huggingface] = snapshots
+        }
+        if accountCount == 1, cachedSnapshot, let liveSnapshot = store.accountSnapshots[.huggingface]?[0].snapshot {
+            store._setSnapshotForTesting(liveSnapshot, provider: .huggingface)
+        }
+        let controller = StatusItemController(
+            store: store,
+            settings: settings,
+            account: fetcher.loadAccountInfo(),
+            updater: DisabledUpdaterController(),
+            preferencesSelection: PreferencesSelection(),
+            statusBar: testStatusBar())
+        defer { controller.releaseStatusItemsForTesting() }
+        return Fixture(store: store, controller: controller, accounts: accounts)
+    }
+
+    private static func makeMenu(fixture: Fixture) throws -> NSMenu {
+        StatusItemController.menuCardRenderingEnabled = true
+        StatusItemController.setMenuRefreshEnabledForTesting(false)
+        defer {
+            StatusItemController.menuCardRenderingEnabled = false
+            StatusItemController.setMenuRefreshEnabledForTesting(true)
+        }
+        let menu = fixture.controller.makeMenu(for: .huggingface)
+        fixture.controller.menuWillOpen(menu)
+        return menu
+    }
+
+    private static func menuCardItemIDs(_ menu: NSMenu) -> [String] {
+        menu.items.compactMap { $0.representedObject as? String }
+            .filter { $0.hasPrefix("tokenAccount") || $0.hasPrefix("menuCard") || $0 == "huggingFaceBrowserWallet" }
+    }
+
+    // MARK: Recovery-matrix fixtures
+
+    private enum LiveMenuModel {
+        case assembled(UsageMenuCardView.Model)
+        case projected(ProjectedWallet)
+    }
+
+    /// Projects the live-card wallet surface for Hugging Face through the same seams as the real
+    /// menu: the store's base snapshot plus the provider-level wallet projection, followed by the
+    /// full `menuCardModel(for:)` assembly so render-relevant fields such as the cost row and
+    /// provider details are exercised end to end.
+    private static func liveMenuModelFixture(
+        store: UsageStore,
+        controller: StatusItemController?) -> LiveMenuModel?
+    {
+        let projected = Self.huggingFaceProviderWalletSnapshotForTesting(store: store)
+        if let controller {
+            guard let model = controller.menuCardModel(
+                for: .huggingface,
+                projectedSnapshotForTesting: projected)
+            else { return nil }
+            return .assembled(model)
+        }
+        guard let wallet = Self.assemblyOnlyMenuModelFixture(projected: projected) else {
+            return nil
+        }
+        return .projected(wallet)
+    }
+
+    /// Controller-less live-card wallet projection: the wallet sections from the real
+    /// `recoveryCarrierSnapshot`/`appendingDetailSection` seams plus whether the carrier
+    /// manufactured spend of its own (`true`) or stayed spend-free (`false`).
+    private struct ProjectedWallet {
+        let sections: [ProviderDetailSection]
+        let hasCost: Bool
+    }
+
+    /// Reprojects the wallet-carrying snapshot through the real section-rendering seam: the
+    /// snapshot's wallet detail section is the exact value the live menu card's details row set
+    /// uses, while the returned cost presence flag records whether the carrier manufactured any
+    /// spend of its own. Any divergence between this seam and the real `providerCost` assembly
+    /// fails the explicitly asserted cost fields of each calling test.
+    private static func assemblyOnlyMenuModelFixture(
+        projected: UsageSnapshot?) -> ProjectedWallet?
+    {
+        guard let projected else { return nil }
+        let sections = projected.details.filter { $0.title == "Browser session wallet" }
+        guard sections.count == 1 else { return nil }
+        return ProjectedWallet(sections: sections, hasCost: projected.providerCost != nil)
+    }
+
+    /// Test-local replica of the controller's provider-level wallet projection. Mirrors the
+    /// `huggingFaceProviderWalletSnapshot` rules exactly: append to the live base snapshot when one
+    /// exists, otherwise ride the minimal identity-less carrier snapshot.
+    private static func huggingFaceProviderWalletSnapshotForTesting(
+        store: UsageStore) -> UsageSnapshot?
+    {
+        guard let publication = store.huggingFaceBrowserWallets[.huggingface],
+              HuggingFaceWalletPresentation.detailSection(publication) != nil
+        else { return store.presentationSnapshot(for: .huggingface) }
+        let base = store.presentationSnapshot(for: .huggingface)
+        if let base {
+            return base.appendingDetailSection(HuggingFaceWalletPresentation.detailSection(publication)!)
+        }
+        return HuggingFaceWalletPresentation.recoveryCarrierSnapshot(publication)
+    }
+
+    private final class APIFailureFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var failing = false
+
+        func setFailing(_ value: Bool) {
+            self.lock.withLock { self.failing = value }
+        }
+
+        var isFailing: Bool {
+            self.lock.withLock { self.failing }
+        }
+    }
+
+    private static func failingAPIFlag() -> APIFailureFlag {
+        APIFailureFlag()
+    }
+
+    private struct WebStubStrategy: ProviderFetchStrategy {
+        let id = "huggingface-web-stub"
+        let kind: ProviderFetchKind = .web
+
+        func isAvailable(_: ProviderFetchContext) async -> Bool {
+            true
+        }
+
+        func fetch(_: ProviderFetchContext) async throws -> ProviderFetchResult {
+            let observedAt = Date(timeIntervalSince1970: 1_777_000_000)
+            let cost = ProviderCostSnapshot(
+                used: 0,
+                limit: 0,
+                currencyCode: "USD",
+                period: "Prepaid credits",
+                balance: 42,
+                updatedAt: observedAt)
+            let usage = UsageSnapshot(
+                primary: nil,
+                secondary: nil,
+                providerCost: cost,
+                updatedAt: observedAt,
+                identity: nil)
+            return self.makeResult(usage: usage, sourceLabel: "web")
+        }
+
+        func shouldFallback(on _: any Error, context _: ProviderFetchContext) -> Bool {
+            false
+        }
+    }
+
+    private struct APIStubStrategy: ProviderFetchStrategy {
+        let failureFlag: APIFailureFlag
+        let id = "huggingface-api-stub"
+        let kind: ProviderFetchKind = .apiToken
+
+        func isAvailable(_: ProviderFetchContext) async -> Bool {
+            true
+        }
+
+        func fetch(_: ProviderFetchContext) async throws -> ProviderFetchResult {
+            guard !self.failureFlag.isFailing else {
+                throw ProviderPluginError.script("fixture API outage")
+            }
+            let cost = ProviderCostSnapshot(
+                used: 12,
+                limit: 0,
+                currencyCode: "USD",
+                period: "Current billing period",
+                updatedAt: Date())
+            let usage = UsageSnapshot(
+                primary: nil,
+                secondary: nil,
+                providerCost: cost,
+                updatedAt: Date(),
+                identity: nil)
+            // API-kind successes carry an outcome payload in production (the Auto strategy always
+            // tags successes, including plain API data). The stub matches that contract here so the
+            // successful follow-up supersedes the recorded Web-owned wallet like a real strategy.
+            return self.makeResult(usage: usage, sourceLabel: "api")
+                .replacingWalletOutcome(.notAttempted)
+        }
+
+        func shouldFallback(on _: any Error, context _: ProviderFetchContext) -> Bool {
+            false
+        }
+    }
+
+    private static func makeStore(
+        settings: SettingsStore,
+        failingAPI: Bool,
+        apiFailureFlag: APIFailureFlag? = nil) throws -> UsageStore
+    {
+        let store = UsageStore(
+            fetcher: UsageFetcher(environment: [:]),
+            browserDetection: BrowserDetection(cacheTTL: 0),
+            settings: settings,
+            startupBehavior: .testing,
+            environmentBase: [:])
+        let baseSpec = try #require(store.providerSpecs[.huggingface])
+        let baseDescriptor = baseSpec.descriptor
+        let flag = apiFailureFlag ?? APIFailureFlag()
+        flag.setFailing(failingAPI)
+        let apiStub = APIStubStrategy(failureFlag: flag)
+        let webStub = WebStubStrategy()
+        store.providerSpecs[.huggingface] = ProviderSpec(
+            style: baseSpec.style,
+            isEnabled: { true },
+            descriptor: ProviderDescriptor(
+                id: .huggingface,
+                metadata: baseDescriptor.metadata,
+                branding: baseDescriptor.branding,
+                tokenCost: baseDescriptor.tokenCost,
+                fetchPlan: ProviderFetchPlan(
+                    sourceModes: [.auto, .api, .web],
+                    pipeline: ProviderFetchPipeline { context in
+                        switch context.sourceMode {
+                        case .web:
+                            [webStub]
+                        default:
+                            [apiStub]
+                        }
+                    }),
+                cli: baseDescriptor.cli),
+            makeFetchContext: baseSpec.makeFetchContext)
+        return store
+    }
+}

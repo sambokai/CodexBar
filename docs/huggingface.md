@@ -73,7 +73,10 @@ snapshots, and the opaque matching ID is never persisted or displayed.
 
 A stacked batch (multiple token accounts in the app or `codexbar --all-accounts`) observes the browser wallet once:
 exactly one identity-matched account keeps the composed balance, multiple matches strip every composition and render
-one provider-level wallet ("matches multiple API token accounts"), and zero matches render it as unverified.
+one provider-level wallet ("matches multiple API token accounts"), and zero matches render it as unverified. The
+provider-level wallet also renders once in the compact multi-account menu, and the live card carries it even when no
+API base snapshot exists. A failed Auto/API refresh that displaced a validated Web-owned snapshot keeps the wallet
+visible once as browser-session data; a failed Web refresh never duplicates it into auxiliary state.
 
 The provider Balance layout token and the provider balance row show the identity-matched prepaid wallet. Hugging Face
 Inference usage remaining and billing-period spend are separate concepts and are never substituted for Credits.
