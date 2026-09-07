@@ -27,9 +27,9 @@
   wallet once at provider level instead of nowhere, a unique match no longer duplicates the wallet with a mismatched
   provider-level copy, and single-account runs with mismatched or unverifiable identity still show one
   provider-level wallet.
-- Hugging Face: keep explicit and persisted Web mode outside API token-account attribution with one provider-level
-  Web result per command batch, clear stale auxiliary wallet state when a fresh Web snapshot publishes, and keep
-  validated browser Credits visible as browser-session data when the best-effort follow-up refresh fails.
+- Hugging Face: render the provider-level browser wallet in compact multi-account menus, carry it on the live card
+  even when no API snapshot exists, and restrict its failed-refresh recovery to Auto/API transitions that actually
+  displaced a validated Web-owned snapshot, so failed Web refreshes never duplicate it into auxiliary state.
 - Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
   use the existing bounded browser-access retry for explicit cookie refreshes, and restore the combined spend and
   wallet snapshot immediately after a successful refresh instead of waiting for the next cycle.

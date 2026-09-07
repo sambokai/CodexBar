@@ -22,7 +22,8 @@ extension StatusItemController {
         planOverride: String? = nil,
         subtitleOverride: String? = nil,
         sourceLabelOverride: String? = nil,
-        creditsOverride: CreditsSnapshot? = nil) -> UsageMenuCardView.Model?
+        creditsOverride: CreditsSnapshot? = nil,
+        projectedSnapshotForTesting: UsageSnapshot? = nil) -> UsageMenuCardView.Model?
     {
         // Provider-specific by design: Codex is the historical card fallback when no enabled provider is available.
         let target = provider ?? self.store.enabledFirstPartyProvidersForDisplay().first ?? .codex
@@ -36,10 +37,14 @@ extension StatusItemController {
         }
         // Override cards belong to a specific account/context. Never fall back to
         // provider-level live data here; that can belong to a different account.
-        let snapshot = self.menuCardSnapshot(
-            provider: target,
-            surface: surface,
-            override: snapshotOverride)
+        let snapshot = if let projectedSnapshotForTesting {
+            projectedSnapshotForTesting
+        } else {
+            self.menuCardSnapshot(
+                provider: target,
+                surface: surface,
+                override: snapshotOverride)
+        }
         let projectedTokenSnapshot = self.store.tokenSnapshot(fromProviderSnapshot: snapshot, provider: target)
         let storedTokenSnapshot = UsageStore.tokenCostRequiresProviderSnapshot(target)
             ? nil
@@ -191,7 +196,10 @@ extension StatusItemController {
     /// Provider-specific by design (FP-194): when Hugging Face's browser wallet cannot be composed
     /// into an account snapshot, the store publishes it as one provider-level value. The live
     /// ambient card carries it as an authority-labeled detail row so both the API spend and the
-    /// wallet remain visible without implying same-account ownership.
+    /// wallet remain visible without implying same-account ownership. When no base snapshot exists
+    /// (e.g. a displaced Web-owned snapshot followed by a failed API replacement with no cached
+    /// account snapshot), the wallet rides a minimal identity-less carrier snapshot instead of
+    /// being dropped.
     private func huggingFaceProviderWalletSnapshot(
         _ snapshot: UsageSnapshot?,
         provider: UsageProvider,
@@ -199,11 +207,15 @@ extension StatusItemController {
     {
         // Provider-specific by design: only Hugging Face publishes a provider-level browser wallet.
         guard provider == .huggingface, surface == .liveCard,
-              let snapshot,
-              let publication = self.store.huggingFaceBrowserWallets[provider.instanceID],
-              let section = HuggingFaceWalletPresentation.detailSection(publication)
+              let publication = self.store.huggingFaceBrowserWallets[provider.instanceID]
         else { return snapshot }
-        return snapshot.appendingDetailSection(section)
+        // Return the shared section builder early so an unrenderable publication never
+        // manufactures a base snapshot.
+        guard let section = HuggingFaceWalletPresentation.detailSection(publication) else { return snapshot }
+        if let snapshot {
+            return snapshot.appendingDetailSection(section)
+        }
+        return HuggingFaceWalletPresentation.recoveryCarrierSnapshot(publication)
     }
 
     private func subscriptionMetadataSnapshot(

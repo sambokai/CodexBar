@@ -391,7 +391,8 @@ extension UsageStore {
             await self.refreshTokenAccounts(
                 provider: provider,
                 accounts: tokenAccountPreparation.accounts,
-                generation: generation)
+                generation: generation,
+                webOverrideRefresh: Self.requestedSourceModeOverride == .web)
             return nil
         } else {
             _ = await MainActor.run {

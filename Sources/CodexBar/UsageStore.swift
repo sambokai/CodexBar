@@ -178,6 +178,14 @@ final class UsageStore {
     // and only restores visibility when a later failed Auto/API refresh replaces that snapshot with
     // a wallet-less cached account snapshot. Holds balance and timestamp only — no credential data.
     var huggingFaceWebOwnedWallets: [ProviderInstanceID: HuggingFaceWalletSnapshot] = [:]
+    // Provider-specific by design: marks that the recorded Hugging Face Web-owned wallet is the
+    // currently live provider snapshot, so only a pending Auto/API replacement that provably
+    // displaces it may trigger `.webSession` failure recovery. Any superseding success clears it.
+    var huggingFaceLiveWebSnapshotOwners: Set<ProviderInstanceID> = []
+    // Provider-specific by design: marks that the validated Web-owned live snapshot is at least
+    // provisionally displaced by an in-flight Auto/API replacement. Only the failure transition
+    // of that exact replacement consumes this flag; every success clears it.
+    var huggingFacePendingWebSnapshotDisplacement: Set<ProviderInstanceID> = []
     var accountSnapshots: [ProviderInstanceID: [TokenAccountUsageSnapshot]] = [:]
     var tokenAccountLiveStateProviders: Set<ProviderInstanceID> = []
     var codexAccountSnapshots: [CodexAccountUsageSnapshot] = []

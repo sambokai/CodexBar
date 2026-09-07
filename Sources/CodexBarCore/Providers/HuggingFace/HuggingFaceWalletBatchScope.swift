@@ -124,6 +124,22 @@ public enum HuggingFaceWalletPresentation {
         else { return nil }
         return try? ProviderDetailSection(title: "Browser session wallet", rows: [balanceRow, attributionRow])
     }
+
+    /// Minimal identity-less presentation snapshot that carries exactly one browser-wallet detail
+    /// section for the provider-level live-card surface. Carries no API spend, usage windows,
+    /// account identity, or ownership claims: the detail section is the entire wallet rendering.
+    public static func recoveryCarrierSnapshot(
+        _ publication: HuggingFaceBrowserWalletPublication) -> UsageSnapshot?
+    {
+        guard let section = self.detailSection(publication) else { return nil }
+        return UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            providerCost: nil,
+            details: [section],
+            updatedAt: publication.observedAt,
+            identity: nil)
+    }
 }
 
 /// The authoritative publication decision for one Hugging Face Auto batch (stacked fan-out, CLI
