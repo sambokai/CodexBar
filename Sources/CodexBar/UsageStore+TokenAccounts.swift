@@ -1570,6 +1570,10 @@ extension UsageStore {
             if provider == .deepseek {
                 self.markDeepSeekProfileTransitionUnavailable()
             }
+            // Provider-specific by design: keep a validated Hugging Face browser wallet visible
+            // when a failed token-account refresh replaced the fresh Web snapshot with a cached
+            // wallet-less account snapshot.
+            self.reconcileHuggingFaceWalletAfterFetchFailure(provider: provider, error: error)
             let retained = Self.shouldPreservePriorSnapshot(after: error, hadPriorData: prior != nil)
                 ? prior?.snapshot : nil
             self.publishSelectedAccountFailure(

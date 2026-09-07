@@ -22,11 +22,16 @@ public struct HuggingFaceBrowserWalletObservation: Equatable, Sendable {
 /// Store-level attribution for a provider-level browser wallet that is not composed into an
 /// account snapshot.
 public enum HuggingFaceWalletAttribution: Equatable, Sendable {
-    /// Browser identity is missing, malformed, or does not match the compared API identity.
+    /// A completed identity comparison was mismatched or unverifiable, so the browser wallet is
+    /// not attributed to the compared API account.
     case unverified
     /// More than one token account in the batch matched the browser identity, so no single
     /// account card can own the wallet.
     case multipleMatchingAccounts
+    /// Store-recovery-only attribution: a valid browser-session wallet value that survived a
+    /// failed Auto/API refresh. No successful token authority exists to compare against, so the
+    /// wallet stays provider-level without claiming any API account.
+    case webSession
 }
 
 /// Provider-level browser wallet value surfaced outside any token-account snapshot.
@@ -111,11 +116,89 @@ public enum HuggingFaceWalletPresentation {
             "Unverified against this API token"
         case .multipleMatchingAccounts:
             "Matches multiple API token accounts"
+        case .webSession:
+            "From browser session · API account not verified"
         }
         guard let balanceRow = try? ProviderDetailSection.Row(label: "Prepaid credits", value: balance),
               let attributionRow = try? ProviderDetailSection.Row(label: "Account", value: attribution)
         else { return nil }
         return try? ProviderDetailSection(title: "Browser session wallet", rows: [balanceRow, attributionRow])
+    }
+}
+
+/// The authoritative publication decision for one Hugging Face Auto batch (stacked fan-out, CLI
+/// multi-account run, or a single fetch). Deciding once, up front, prevents the same browser wallet
+/// from being rediscovered later from per-account outcomes — which previously allowed a unique
+/// composition and a mismatched provider-level publication to render together.
+public enum HuggingFaceWalletBatchDecision: Equatable, Sendable {
+    /// Exactly one account matched the browser identity and owns the composed wallet; no
+    /// provider-level publication exists.
+    case composedOnAccount
+    /// The wallet renders once at provider level with the given attribution.
+    case providerLevel(HuggingFaceBrowserWalletPublication)
+    /// The batch attempted-and-failed or skipped browser wallet work on a successful API fetch;
+    /// provider-level wallet state must clear.
+    case clear
+    /// Every fetch failed before wallet work, so this batch makes no wallet transition.
+    case noTransition
+}
+
+/// Pure, side-effect-free batch reconciliation shared by the app store's stacked post-pass and the
+/// CLI's multi-account batch, so both sites make the same batch-authoritative decision.
+public enum HuggingFaceWalletBatchReconciliation {
+    public struct Reconciled: Equatable, Sendable {
+        /// The batch's single publication decision.
+        public let decision: HuggingFaceWalletBatchDecision
+        /// True only for genuine multi-match ambiguity: every provisional `localMatchComposed`
+        /// outcome must be stripped from its account snapshot because no account card may own
+        /// the wallet when the decision publishes it at provider level.
+        public let stripsCompositions: Bool
+    }
+
+    /// Decides the batch's publication from per-account wallet outcomes. Invariants: exactly one
+    /// composed account keeps the composition with no provider-level wallet; more than one
+    /// composed account strips every composition and publishes one
+    /// `.multipleMatchingAccounts` wallet; zero composed accounts publish the observed
+    /// `.unverified` wallet; attempted-and-unavailable or skipped work clears; failures before
+    /// wallet work make no transition.
+    public static func reconcile(_ outcomes: [HuggingFaceBrowserWalletOutcome?]) -> Reconciled {
+        let composedWallets = outcomes.compactMap { $0?.composedWallet }
+        if composedWallets.count > 1, let wallet = composedWallets.first {
+            return Reconciled(
+                decision: .providerLevel(HuggingFaceBrowserWalletPublication(
+                    balanceUSD: wallet.balanceUSD,
+                    observedAt: wallet.observedAt,
+                    attribution: .multipleMatchingAccounts)),
+                stripsCompositions: true)
+        }
+        if composedWallets.count == 1 {
+            return Reconciled(decision: .composedOnAccount, stripsCompositions: false)
+        }
+        if let publication = outcomes.compactMap({ $0?.providerLevelPublication }).first {
+            return Reconciled(decision: .providerLevel(publication), stripsCompositions: false)
+        }
+        if outcomes.contains(where: { $0?.makesDeterministicClearingTransition == true }) {
+            return Reconciled(decision: .clear, stripsCompositions: false)
+        }
+        return Reconciled(decision: .noTransition, stripsCompositions: false)
+    }
+
+    /// Removes a provisional composed wallet balance from an API snapshot, leaving the reported
+    /// spend untouched. Used when ambiguous attribution moves the wallet to provider level.
+    public static func strippingWalletBalance(from usage: UsageSnapshot) -> UsageSnapshot {
+        guard let cost = usage.providerCost, cost.balance != nil else { return usage }
+        let strippedCost = ProviderCostSnapshot(
+            used: cost.used,
+            limit: cost.limit,
+            currencyCode: cost.currencyCode,
+            period: cost.period,
+            resetsAt: cost.resetsAt,
+            nextRegenAmount: cost.nextRegenAmount,
+            personalUsed: cost.personalUsed,
+            balance: nil,
+            balanceUpdatedAt: nil,
+            updatedAt: cost.updatedAt)
+        return usage.with(providerCost: strippedCost)
     }
 }
 
@@ -162,8 +245,16 @@ public actor HuggingFaceWalletBatchScope {
             operation = inFlight
         } else {
             let registeredFetcher = self.fetcher!
-            operation = HuggingFaceSingleFlight(task: Task.detached(priority: .userInitiated) {
+            // This actor method body runs inside the initiating caller's task, so its task-locals
+            // are visible here. The shared work runs on a detached task, which inherits no
+            // task-locals: the context-preserving wrapper restores the initiating caller's
+            // `ProviderInteractionContext` and `BrowserCookieAccessGate` explicit-retry scope so a
+            // user-initiated bounded cookie retry stays permitted inside the shared operation.
+            let contextPreservingFetcher = BrowserCookieAccessGate.operationPreservingAccessContext {
                 try await registeredFetcher(context)
+            }
+            operation = HuggingFaceSingleFlight(task: Task.detached(priority: .userInitiated) {
+                try await contextPreservingFetcher()
             })
             self.inFlight = operation
         }

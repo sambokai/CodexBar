@@ -857,6 +857,9 @@ extension UsageStore {
         if provider == .deepseek {
             self.markDeepSeekProfileTransitionUnavailable()
         }
+        // Provider-specific by design: keep a validated Hugging Face browser wallet visible when a
+        // failed refresh replaced the fresh Web snapshot with a wallet-less cached account snapshot.
+        self.reconcileHuggingFaceWalletAfterFetchFailure(provider: provider, error: error)
         self.bindCodexFailurePublicationOwner(
             provider: provider,
             expectedGuard: context.codexExpectedGuard)

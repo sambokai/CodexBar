@@ -93,7 +93,7 @@ complete when the available scan window covers fewer days.
 | Ollama | API key verifies Cloud API access (`api`); browser cookies expose Cloud quota windows (`web`). |
 | Synthetic | API key from config/env → quota API (`api`). |
 | OpenRouter | API token (config, overrides env) → credits API (`api`). |
-| Hugging Face | Auto: API billing only when an API credential is available; otherwise the Web prepaid Credits wallet when Web billing is enabled. Explicit API and Web selections choose exactly one source. |
+| Hugging Face | Auto: bearer-token API billing spend plus the browser-session prepaid Credits wallet together when both are safely available; cookie-only Auto falls back to the wallet alone. Explicit API and Web selections remain authority-isolated. |
 | Perplexity | Browser cookies/manual cookie/env session token → credits API (`web`). |
 | Xiaomi MiMo | Browser cookies → balance/token plan endpoints (`web`). |
 | Doubao | API key from config/env → Volcengine Ark chat-completions probe (`api`). |
@@ -428,12 +428,20 @@ provider-specific cookie validation, endpoints, login detection, and error trans
 - The current wallet is the server-rendered `div[data-props]` field `entity.currentBalanceUsd` for a personal user
   entity. It is already USD; zero and fractional cents are valid. The legacy top-level `invoiceCreditsCents` value is
   converted from safe integer cents only when the current field is absent.
-- Auto mode returns API billing only when a bearer-token credential is available. Without an API credential, it can
-  return the Web prepaid Credits wallet when Web billing is enabled. Hugging Face does not expose a verified shared
-  identifier across these auth paths, so separately configured credentials are expected to belong to the same account
-  and no unverified page field is used for correlation. Web mode returns a balance-only snapshot without bearer data.
-- The Usage source picker provides explicit API/Web selection, each of which selects exactly one source. Cookie source
-  Refresh explicitly validates the Web wallet path; it does not turn ordinary Auto into API-plus-wallet composition.
+- Auto mode reports bearer-token API billing spend plus the browser-session prepaid Credits wallet
+  together whenever both are safely available. Without an API credential, cookie-only Auto returns the
+  Web prepaid Credits wallet alone. Private identity matching (`whoami-v2` opaque user IDs) gates
+  composition: a uniquely matching token account carries the wallet on its card, several matching
+  accounts strip every composition and render one provider-level `.multipleMatchingAccounts` wallet,
+  and mismatched or unverifiable identity renders one provider-level `unverified` wallet. Explicit API
+  and Web selections remain authority-isolated; Web mode returns a balance-only snapshot without
+  bearer data and never adopts token-account labels, cache keys, or per-account fan-out.
+- A failed Auto/API refresh after a validated browser wallet was published keeps that wallet visible
+  once at provider level as browser-session data (not attributed to any API account) until the next
+  successful refresh supersedes it.
+- The Usage source picker provides explicit API/Web selection, each of which stays authority-isolated. Cookie source
+  Refresh explicitly validates the Web wallet path, commits the staged browser cookies, and immediately follows up
+  with one ordinary Auto refresh so the combined spend-plus-wallet snapshot returns right away.
 - The Balance layout token uses the reported wallet and never derives it from inference allowance, plan, or spend.
 - Status: none yet.
 - Details: `docs/huggingface.md`.

@@ -16,6 +16,8 @@ private actor HuggingFaceAuthorityFetchRecorder {
 
     private(set) var apiRequests: [Request] = []
     private(set) var webRequests: [Request] = []
+    var apiFailureMode = false
+    var composedAccountID: UUID?
 
     func recordAPI(_ context: ProviderFetchContext) {
         self.apiRequests.append(Request(sourceMode: context.sourceMode, accountID: context.selectedTokenAccountID))
@@ -24,10 +26,19 @@ private actor HuggingFaceAuthorityFetchRecorder {
     func recordWeb(_ context: ProviderFetchContext) {
         self.webRequests.append(Request(sourceMode: context.sourceMode, accountID: context.selectedTokenAccountID))
     }
+
+    func setAPIFailureMode(_ enabled: Bool) {
+        self.apiFailureMode = enabled
+    }
+
+    func setComposedAccountID(_ id: UUID?) {
+        self.composedAccountID = id
+    }
 }
 
 private struct HuggingFaceAPIStubStrategy: ProviderFetchStrategy {
     let recorder: HuggingFaceAuthorityFetchRecorder
+    let composedBalanceUSD: Double = 42
 
     let id = "huggingface-api-stub"
     let kind: ProviderFetchKind = .apiToken
@@ -38,6 +49,31 @@ private struct HuggingFaceAPIStubStrategy: ProviderFetchStrategy {
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         await self.recorder.recordAPI(context)
+        guard await !self.recorder.apiFailureMode else {
+            throw ProviderPluginError.script("fixture API outage")
+        }
+        let isComposedMatch = await self.recorder.composedAccountID == context.selectedTokenAccountID
+        if isComposedMatch {
+            let observedAt = Date()
+            let cost = ProviderCostSnapshot(
+                used: 12,
+                limit: 0,
+                currencyCode: "USD",
+                period: "Current billing period",
+                balance: self.composedBalanceUSD,
+                balanceUpdatedAt: observedAt,
+                updatedAt: observedAt)
+            let usage = UsageSnapshot(
+                primary: nil,
+                secondary: nil,
+                providerCost: cost,
+                updatedAt: observedAt,
+                identity: nil)
+            return self.makeResult(usage: usage, sourceLabel: "api+web")
+                .replacingWalletOutcome(.localMatchComposed(
+                    balanceUSD: self.composedBalanceUSD,
+                    observedAt: observedAt))
+        }
         let cost = ProviderCostSnapshot(
             used: 12,
             limit: 0,
@@ -45,7 +81,14 @@ private struct HuggingFaceAPIStubStrategy: ProviderFetchStrategy {
             period: "Current billing period",
             updatedAt: Date())
         let usage = UsageSnapshot(primary: nil, secondary: nil, providerCost: cost, updatedAt: Date(), identity: nil)
+        let unverified = await self.recorder.composedAccountID != nil
         return self.makeResult(usage: usage, sourceLabel: "api")
+            .replacingWalletOutcome(unverified
+                ? .providerLevel(HuggingFaceBrowserWalletPublication(
+                    balanceUSD: self.composedBalanceUSD,
+                    observedAt: Date(),
+                    attribution: .unverified))
+                : nil)
     }
 
     func shouldFallback(on _: any Error, context _: ProviderFetchContext) -> Bool {
@@ -217,6 +260,108 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
         #expect(restoredDisplay.layout == .stacked)
         #expect(restoredDisplay.snapshots.map(\.account.id) == accounts.map(\.id))
         #expect(store.accountSnapshots[.huggingface]?.map(Self.cacheIdentity) == cachedAPIState)
+    }
+
+    @Test
+    func `successful web publication clears a prior auxiliary wallet and records the browser value`() async throws {
+        let settings = Self.makeSettings(suite: "hf-web-authority-clears-auxiliary")
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        let recorder = HuggingFaceAuthorityFetchRecorder()
+        let store = try Self.makeStore(settings: settings, recorder: recorder)
+        // A stale Auto provider-level auxiliary publication from a previous refresh.
+        store.huggingFaceBrowserWallets[.huggingface] = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 7,
+            observedAt: Date(),
+            attribution: .unverified)
+
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+
+        // The fresh Web snapshot owns the visible wallet; the old auxiliary publication is gone
+        // and the browser value is recorded for failure-time recovery.
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        let recorded = try #require(store.huggingFaceWebOwnedWallets[.huggingface])
+        #expect(recorded.balanceUSD == 42)
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+        #expect(store.lastSourceLabels[.huggingface] == "web")
+    }
+
+    @Test
+    func `failed auto follow-up after web validation keeps the validated wallet visible`() async throws {
+        let settings = Self.makeSettings(suite: "hf-web-authority-failed-follow-up")
+        settings.multiAccountMenuLayout = .stacked
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let recorder = HuggingFaceAuthorityFetchRecorder()
+        let store = try Self.makeStore(settings: settings, recorder: recorder)
+
+        // Phase 1: an ordinary Auto refresh populates the stacked API account caches.
+        await store.refreshProvider(.huggingface)
+        let cachedSnapshots = try #require(store.accountSnapshots[.huggingface])
+        #expect(cachedSnapshots.count == 2)
+
+        // Phase 2: Cookie source Refresh validates the Web wallet in isolation.
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+
+        // Phase 3: the best-effort ordinary Auto follow-up fails before wallet work while the
+        // cached account snapshots are retained.
+        await recorder.setAPIFailureMode(true)
+        await store.refreshProvider(.huggingface)
+
+        // The activated cached API snapshot has no wallet, so the validated Credits must stay
+        // visible once at provider level with browser-session attribution.
+        let snapshot = try #require(store.snapshot(for: .huggingface))
+        #expect(snapshot.providerCost?.balance == nil)
+        let publication = try #require(store.huggingFaceBrowserWallets[.huggingface])
+        #expect(publication.balanceUSD == 42)
+        #expect(publication.attribution == .webSession)
+        #expect(store.accountSnapshots[.huggingface]?.count == 2)
+    }
+
+    @Test
+    func `successful auto follow-up after web validation transitions to the composed state`() async throws {
+        let settings = Self.makeSettings(suite: "hf-web-authority-successful-follow-up")
+        settings.multiAccountMenuLayout = .stacked
+        let recorder = HuggingFaceAuthorityFetchRecorder()
+        let store = try Self.makeStore(settings: settings, recorder: recorder)
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let accounts = settings.tokenAccounts(for: .huggingface)
+        await recorder.setComposedAccountID(accounts[0].id)
+
+        // Cookie source Refresh validates the Web wallet first.
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        #expect(store.snapshot(for: .huggingface)?.providerCost?.balance == 42)
+
+        // The ordinary Auto follow-up succeeds: the uniquely matching account composes the wallet
+        // and both the provider-level wallet and the recorded Web value are superseded.
+        await store.refreshProvider(.huggingface)
+
+        let snapshots = try #require(store.accountSnapshots[.huggingface])
+        #expect(snapshots[0].snapshot?.providerCost?.balance == 42)
+        #expect(snapshots[0].sourceLabel == "api+web")
+        #expect(snapshots[1].snapshot?.providerCost?.balance == nil)
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        #expect(store.huggingFaceWebOwnedWallets[.huggingface] == nil)
+    }
+
+    @Test
+    func `web session recovery renders browser session attribution wording`() throws {
+        let publication = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 42,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .webSession)
+        let section = try #require(HuggingFaceWalletPresentation.detailSection(publication))
+        #expect(section.rows.map(\.value) == ["$42.00", "From browser session · API account not verified"])
+
+        // Token-relative wording is reserved for completed comparisons that failed to verify.
+        let unverified = HuggingFaceBrowserWalletPublication(
+            balanceUSD: 42,
+            observedAt: Date(timeIntervalSince1970: 1_777_000_000),
+            attribution: .unverified)
+        let unverifiedSection = try #require(HuggingFaceWalletPresentation.detailSection(unverified))
+        #expect(unverifiedSection.rows.map(\.value) == ["$42.00", "Unverified against this API token"])
     }
 
     private static func makeSettings(suite: String) -> SettingsStore {

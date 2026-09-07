@@ -170,8 +170,14 @@ final class UsageStore {
     var knownLimitsAvailabilityByProvider: [ProviderInstanceID: UsageLimitsAvailability] = [:]
     var lastSourceLabels: [ProviderInstanceID: String] = [:]
     var lastFetchAttempts: [ProviderInstanceID: [ProviderFetchAttempt]] = [:]
-    // Provider-specific by design: one in-memory provider-level browser wallet, never account-cached.
+    /// Provider-specific by design: one in-memory provider-level browser wallet, never account-cached.
     var huggingFaceBrowserWallets: [ProviderInstanceID: HuggingFaceBrowserWalletPublication] = [:]
+    // Provider-specific by design: the most recently published browser wallet from a successful
+    // Hugging Face Web-kind snapshot (explicit Web mode or cookie-only Auto). The fresh Web snapshot
+    // itself owns the visible wallet, so this record is kept separate from the auxiliary publication
+    // and only restores visibility when a later failed Auto/API refresh replaces that snapshot with
+    // a wallet-less cached account snapshot. Holds balance and timestamp only — no credential data.
+    var huggingFaceWebOwnedWallets: [ProviderInstanceID: HuggingFaceWalletSnapshot] = [:]
     var accountSnapshots: [ProviderInstanceID: [TokenAccountUsageSnapshot]] = [:]
     var tokenAccountLiveStateProviders: Set<ProviderInstanceID> = []
     var codexAccountSnapshots: [CodexAccountUsageSnapshot] = []

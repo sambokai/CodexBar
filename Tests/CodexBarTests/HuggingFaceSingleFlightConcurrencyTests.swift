@@ -408,4 +408,68 @@ struct HuggingFaceSingleFlightConcurrencyTests {
         #expect(observation.wallet.balanceUSD == 4.5)
         #expect(await arrivals.count == 1)
     }
+
+    @Test
+    func `shared wallet work preserves the initiating caller's user initiated explicit retry scope`() async throws {
+        let observer = ContextObserver()
+        let scope = HuggingFaceWalletBatchScope()
+        let context = concurrencyFetchContext()
+        let fetcher: HuggingFaceWalletBatchScope.ObservationFetcher = { _ in
+            await observer.record(
+                ProviderInteractionContext.current,
+                BrowserCookieAccessGate.hasExplicitRetryScopeForTesting)
+            return HuggingFaceBrowserWalletObservation(
+                wallet: HuggingFaceWalletSnapshot(
+                    balanceUSD: 9.25,
+                    observedAt: Date(timeIntervalSince1970: 1_777_000_000)),
+                identity: nil)
+        }
+
+        // A user-initiated cookie refresh wraps the batch observation in the bounded explicit
+        // browser-access retry scope. The shared operation must keep both task-local values.
+        try await ProviderInteractionContext.$current.withValue(.userInitiated) {
+            try await BrowserCookieAccessGate.withExplicitRetry {
+                _ = try await scope.observation(for: context, fetcher: fetcher)
+            }
+        }
+
+        #expect(await observer.interaction == .userInitiated)
+        #expect(await observer.hasExplicitRetryScope == true)
+    }
+
+    @Test
+    func `a detached operation without context preservation loses the browser access context`() async throws {
+        // Test-local negative control (FP-194): shared work started on a detached task WITHOUT the
+        // context-preserving wrapper observes the default background interaction and no explicit
+        // retry scope, even though the initiating caller had both bound. Production code always
+        // wraps the shared wallet work, but this control proves the positive test's assertions
+        // actually detect a lost access context.
+        let observer = ContextObserver()
+        let probe: @Sendable () async throws -> Void = {
+            await observer.record(
+                ProviderInteractionContext.current,
+                BrowserCookieAccessGate.hasExplicitRetryScopeForTesting)
+        }
+        try await ProviderInteractionContext.$current.withValue(.userInitiated) {
+            try await BrowserCookieAccessGate.withExplicitRetry {
+                let task = Task.detached(priority: .userInitiated) {
+                    try await probe()
+                }
+                try await task.value
+            }
+        }
+
+        #expect(await observer.interaction == .background)
+        #expect(await observer.hasExplicitRetryScope == false)
+    }
+}
+
+private actor ContextObserver {
+    private(set) var interaction: ProviderInteraction?
+    private(set) var hasExplicitRetryScope: Bool?
+
+    func record(_ interaction: ProviderInteraction, _ hasExplicitRetryScope: Bool) {
+        self.interaction = interaction
+        self.hasExplicitRetryScope = hasExplicitRetryScope
+    }
 }

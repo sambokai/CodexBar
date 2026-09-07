@@ -305,6 +305,21 @@ extension CodexBarCLI {
             return output
         }
 
+        // Provider-specific by design (FP-194): explicit and persisted Hugging Face Web mode is
+        // browser-session authority only. The browser wallet is fetched once and rendered as one
+        // provider-level Web result — no API account label, no token-account cache key, and no
+        // per-account fan-out regardless of a configured token account or `--all-accounts`.
+        let baseSource = command.sourceModeOverride ?? tokenContext.preferredSourceMode(for: provider)
+        // Provider-specific by design: Hugging Face Web selection bypasses token-account enumeration
+        // entirely, for both the explicit `--source web` flag and persisted config selection.
+        if provider == .huggingface, baseSource == .web {
+            return await Self.fetchHuggingFaceProviderWebOutput(
+                provider: provider,
+                status: status,
+                tokenContext: tokenContext,
+                command: command)
+        }
+
         let accounts: [ProviderTokenAccount]
         do {
             accounts = try tokenContext.resolvedAccounts(for: provider)
@@ -321,12 +336,13 @@ extension CodexBarCLI {
         let accountRefreshDelay = TokenAccountSupportCatalog
             .support(for: provider)?.minimumDelayBetweenAccountRefreshes
 
-        // Provider-specific by design (FP-194): a multi-account Hugging Face Auto batch shares one
-        // wallet batch scope, so the browser wallet is observed once and ambiguous identity matches
-        // render one provider-level wallet instead of once per account.
-        let huggingFaceWalletBatch: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)]? =
+        // Provider-specific by design (FP-194): every Hugging Face Auto/API batch — including a
+        // single-account run — shares one wallet batch scope and one batch-authoritative wallet
+        // decision, so the browser wallet is observed once and renders at most once at provider
+        // level instead of once per account.
+        let huggingFaceWalletBatch: HuggingFaceWalletBatch? =
             // Provider-specific by design: Hugging Face is the only provider with a browser wallet.
-            if provider == .huggingface, selections.count > 1 {
+            if provider == .huggingface {
                 await Self.fetchHuggingFaceWalletBatch(
                     selections: selections,
                     accountRefreshDelay: accountRefreshDelay,
@@ -346,7 +362,7 @@ extension CodexBarCLI {
                 }
             }
             let prefetched = huggingFaceWalletBatch.flatMap { batch in
-                batch.first { $0.account?.id == account?.id }
+                batch.entries.first { $0.account?.id == account?.id }
             }
             let result = await Self.fetchUsageOutput(
                 provider: provider,
@@ -359,24 +375,79 @@ extension CodexBarCLI {
         }
         if let huggingFaceWalletBatch {
             await Self.appendHuggingFaceProviderWalletOutput(
-                batch: huggingFaceWalletBatch,
+                decision: huggingFaceWalletBatch.decision,
                 status: status,
-                tokenContext: tokenContext,
                 command: command,
                 output: &output)
         }
         return output
     }
 
-    /// Provider-specific by design: phase 1 of the multi-account Hugging Face batch — fetch every
-    /// account with one shared wallet batch scope, then apply the same global-uniqueness post-pass
-    /// as the app's stacked fan-out before any rendering happens.
+    /// Provider-specific by design (FP-194): one provider-level Hugging Face Web fetch and render
+    /// for the whole command batch, with the account untouched.
+    private static func fetchHuggingFaceProviderWebOutput(
+        provider: UsageProvider,
+        status: ProviderStatusPayload?,
+        tokenContext: TokenAccountCLIContext,
+        command: UsageCommandContext) async -> UsageCommandOutput
+    {
+        let outcome = await Self.fetchHuggingFaceProviderWebOutcome(
+            tokenContext: tokenContext,
+            command: command)
+        return await Self.fetchUsageOutput(
+            provider: provider,
+            account: nil,
+            status: status,
+            tokenContext: tokenContext,
+            command: command,
+            prefetchedOutcome: outcome)
+    }
+
+    private static func fetchHuggingFaceProviderWebOutcome(
+        tokenContext: TokenAccountCLIContext,
+        command: UsageCommandContext) async -> ProviderFetchOutcome
+    {
+        if let override = _test_providerWebFetchOutcomeOverride {
+            return await override()
+        }
+        // Provider-specific by design: Hugging Face's provider-level Web fetch runs without any
+        // token-account context so no credential environment can leak into it.
+        let context = Self.makeUsageFetchContext(
+            provider: .huggingface,
+            account: nil,
+            tokenContext: tokenContext,
+            command: command)
+        return await Self.fetchProviderUsage(provider: .huggingface, context: context)
+    }
+
+    private static let testWebFetchOverrideLock = NSLock()
+    private nonisolated(unsafe) static var providerWebFetchOutcomeOverrideStorage:
+        (@Sendable () async -> ProviderFetchOutcome)?
+
+    /// Test-only seam (FP-194): replaces the provider-level Hugging Face Web fetch outcome so tests
+    /// can prove authority-isolated Web rendering without network access. Never set in production.
+    static var _test_providerWebFetchOutcomeOverride: (@Sendable () async -> ProviderFetchOutcome)? {
+        get { self.testWebFetchOverrideLock.withLock { self.providerWebFetchOutcomeOverrideStorage } }
+        set { self.testWebFetchOverrideLock.withLock { self.providerWebFetchOutcomeOverrideStorage = newValue } }
+    }
+
+    /// Provider-specific by design (FP-194): the reconciled Hugging Face wallet batch — rewritten
+    /// per-account outcomes plus the batch-authoritative publication decision.
+    struct HuggingFaceWalletBatch {
+        let entries: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)]
+        let decision: HuggingFaceWalletBatchDecision
+    }
+
+    /// Provider-specific by design: phase 1 of the Hugging Face batch — fetch every account with
+    /// one shared wallet batch scope, then apply the same batch-authoritative decision as the
+    /// app's stacked fan-out (`UsageStore.reconcileHuggingFaceWalletAttribution`) before any
+    /// rendering happens.
     private static func fetchHuggingFaceWalletBatch(
         selections: [ProviderTokenAccount?],
         accountRefreshDelay: Duration?,
         status: ProviderStatusPayload?,
         tokenContext: TokenAccountCLIContext,
-        command: UsageCommandContext) async -> [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)]
+        command: UsageCommandContext) async -> HuggingFaceWalletBatch
     {
         let scope = HuggingFaceWalletBatchScope()
         var fetched: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)] = []
@@ -385,7 +456,9 @@ extension CodexBarCLI {
                 do {
                     try await Task.sleep(for: accountRefreshDelay)
                 } catch {
-                    return fetched
+                    return fetched.isEmpty
+                        ? HuggingFaceWalletBatch(entries: [], decision: .noTransition)
+                        : Self.reconciledHuggingFaceWalletBatch(fetched)
                 }
             }
             let context = self.makeUsageFetchContext(
@@ -400,46 +473,49 @@ extension CodexBarCLI {
         return Self.reconciledHuggingFaceWalletBatch(fetched)
     }
 
-    /// Provider-specific by design: strips provisional wallet compositions when more than one
-    /// token account matched the browser identity, mirroring
+    /// Provider-specific by design: applies the shared batch-authoritative wallet decision
+    /// (`HuggingFaceWalletBatchReconciliation`) to the CLI batch, mirroring
     /// `UsageStore.reconcileHuggingFaceWalletAttribution`.
     static func reconciledHuggingFaceWalletBatch(
         _ fetched: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)])
-        -> [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)]
+        -> HuggingFaceWalletBatch
     {
-        let composedCount = fetched.count(where: { entry in
-            guard case let .success(result) = entry.outcome.result else { return false }
-            return result.huggingFaceWalletOutcome?.isLocalMatchComposed == true
-        })
-        guard composedCount > 1 else { return fetched }
-        return fetched.map { entry in
-            guard case let .success(result) = entry.outcome.result,
-                  result.huggingFaceWalletOutcome?.isLocalMatchComposed == true
-            else { return entry }
-            let stripped = result
-                .replacingUsage(Self.strippingHuggingFaceWalletBalance(from: result.usage))
-                .replacingSourceLabel("api")
-                .replacingWalletOutcome(nil)
-            return (
-                entry.account,
-                ProviderFetchOutcome(result: .success(stripped), attempts: entry.outcome.attempts))
+        let walletOutcomes = fetched.map { entry -> HuggingFaceBrowserWalletOutcome? in
+            guard case let .success(result) = entry.outcome.result else { return nil }
+            return result.huggingFaceWalletOutcome
         }
+        let reconciled = HuggingFaceWalletBatchReconciliation.reconcile(walletOutcomes)
+        var entries = fetched
+        if reconciled.stripsCompositions {
+            // Ambiguous attribution: no account card may own the wallet. Strip every provisional
+            // composition so the single browser value renders once at provider level.
+            entries = fetched.map { entry in
+                guard case let .success(result) = entry.outcome.result,
+                      result.huggingFaceWalletOutcome?.isLocalMatchComposed == true
+                else { return entry }
+                let stripped = result
+                    .replacingUsage(HuggingFaceWalletBatchReconciliation.strippingWalletBalance(
+                        from: result.usage))
+                    .replacingSourceLabel("api")
+                    .replacingWalletOutcome(nil)
+                return (
+                    entry.account,
+                    ProviderFetchOutcome(result: .success(stripped), attempts: entry.outcome.attempts))
+            }
+        }
+        return HuggingFaceWalletBatch(entries: entries, decision: reconciled.decision)
     }
 
-    /// Renders the single provider-level browser wallet for a multi-account batch when identity
-    /// attribution is unverified or ambiguous.
-    private static func appendHuggingFaceProviderWalletOutput(
-        batch: [(account: ProviderTokenAccount?, outcome: ProviderFetchOutcome)],
+    /// Renders the single provider-level browser wallet for a Hugging Face batch when the
+    /// batch-authoritative decision publishes it at provider level (ambiguous or unverified
+    /// attribution). Never renders when an account owns the composed wallet.
+    static func appendHuggingFaceProviderWalletOutput(
+        decision: HuggingFaceWalletBatchDecision,
         status: ProviderStatusPayload?,
-        tokenContext: TokenAccountCLIContext,
         command: UsageCommandContext,
         output: inout UsageCommandOutput) async
     {
-        let publication = batch.compactMap { entry -> HuggingFaceBrowserWalletPublication? in
-            guard case let .success(result) = entry.outcome.result else { return nil }
-            return result.huggingFaceWalletOutcome?.providerLevelPublication
-        }.first
-        guard let publication else { return }
+        guard case let .providerLevel(publication) = decision else { return }
         guard let walletSection = HuggingFaceWalletPresentation.detailSection(publication) else { return }
         let usage = UsageSnapshot(
             primary: nil,
@@ -492,22 +568,6 @@ extension CodexBarCLI {
                 diagnostic: nil,
                 weeklyWorkDays: command.weeklyWorkDays))
         }
-    }
-
-    private static func strippingHuggingFaceWalletBalance(from usage: UsageSnapshot) -> UsageSnapshot {
-        guard let cost = usage.providerCost, cost.balance != nil else { return usage }
-        let strippedCost = ProviderCostSnapshot(
-            used: cost.used,
-            limit: cost.limit,
-            currencyCode: cost.currencyCode,
-            period: cost.period,
-            resetsAt: cost.resetsAt,
-            nextRegenAmount: cost.nextRegenAmount,
-            personalUsed: cost.personalUsed,
-            balance: nil,
-            balanceUpdatedAt: nil,
-            updatedAt: cost.updatedAt)
-        return usage.with(providerCost: strippedCost)
     }
 
     private static func makeUsageFetchContext(
@@ -632,7 +692,11 @@ extension CodexBarCLI {
             await Self.emitAugmentDebugIfNeeded(provider: provider, command: command)
 
             var usage = result.usage.scoped(to: provider)
-            if let account {
+            // Provider-specific by design: Hugging Face Web-kind snapshots (explicit Web mode and
+            // cookie-only Auto) are browser-session authority with no API account ownership —
+            // never relabeled with a token-account label or keyed as one, mirroring the app store.
+            let isHuggingFaceWebWallet = provider == .huggingface && result.strategyKind == .web
+            if let account, !isHuggingFaceWebWallet {
                 usage = tokenContext.applyAccountLabel(usage, provider: provider, account: account)
             } else if let codexVisibleAccount {
                 usage = tokenContext.applyCodexVisibleAccountLabel(usage, account: codexVisibleAccount)
@@ -663,8 +727,10 @@ extension CodexBarCLI {
             Self.appendSuccessRenderOutput(
                 UsageSuccessRenderInput(
                     provider: provider,
-                    accountLabel: account?.label ?? codexVisibleAccount?.menuDisplayName,
-                    cacheAccountKey: cacheAccountKey,
+                    accountLabel: isHuggingFaceWebWallet
+                        ? nil
+                        : account?.label ?? codexVisibleAccount?.menuDisplayName,
+                    cacheAccountKey: isHuggingFaceWebWallet ? nil : cacheAccountKey,
                     version: version,
                     source: source,
                     status: status,
