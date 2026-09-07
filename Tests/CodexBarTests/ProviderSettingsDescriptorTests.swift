@@ -256,7 +256,9 @@ struct ProviderSettingsDescriptorTests {
 
                 await action.perform()
 
-                #expect(observedSourceModes == [.web])
+                // FP-194: the Web wallet validation runs first, then the committed cookies are
+                // followed by one best-effort ordinary Auto refresh.
+                #expect(observedSourceModes == [.web, .auto])
                 #expect(fixture.settings.showOptionalCreditsAndExtraUsage == false)
                 #expect(fixture.store.lastSourceLabels[.huggingface] == "web")
                 #expect(fixture.store.snapshot(for: UsageProvider.huggingface.instanceID)?.providerCost?.balance == 7.5)

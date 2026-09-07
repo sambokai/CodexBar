@@ -379,6 +379,13 @@ extension UsageStore {
             self.scheduleClaudeSwapAccountRefresh(generation: generation)
         }
 
+        // Provider-specific by design (FP-194): reconcile browser-wallet eligibility before any
+        // fetch dispatch — including the stacked fan-out path below — so disabling the browser
+        // authority or selecting isolated API mode clears stale provider-level wallets even when
+        // the subsequent API request fails.
+        let walletEligibilityContext = self.makeFetchContext(provider: provider, override: nil)
+        self.reconcileHuggingFaceWalletEligibility(provider: provider, context: walletEligibilityContext)
+
         let tokenAccountPreparation = self.tokenAccountRefreshPreparation(for: provider)
         if self.shouldFetchAllTokenAccounts(provider: provider, accounts: tokenAccountPreparation.accounts) {
             await self.refreshTokenAccounts(
@@ -696,8 +703,9 @@ extension UsageStore {
         if context.tokenAccount != nil, currentTokenAccount == nil {
             return
         }
-        // Hugging Face's browser-session wallet has no identifier that can be correlated with an API
-        // token account. Never relabel or cache it as though it belonged to the selected token account.
+        // Hugging Face's explicit-Web wallet has no account authority, so it must never be
+        // relabeled or cached as though it belonged to the selected token account. Identity-matched
+        // Auto compositions carry the API strategy kind and are scoped normally.
         let isHuggingFaceWebWallet = provider == .huggingface && result.strategyKind == .web
         let accountScoped = if let tokenAccount = currentTokenAccount, !isHuggingFaceWebWallet {
             self.applyAccountLabel(scoped, provider: provider, account: tokenAccount)
@@ -756,20 +764,9 @@ extension UsageStore {
             if provider == .deepseek {
                 self.clearDeepSeekProfileTransition()
             }
-            if let tokenSnapshot = self.tokenSnapshot(fromProviderSnapshot: backfilled, provider: provider) {
-                self.publishTokenSnapshot(tokenSnapshot, for: provider)
-                self.tokenErrors[provider.instanceID] = nil
-                self.tokenFailureGates[provider.instanceID]?.recordSuccess()
-            } else if provider == .xai, XAICostUsageMapping.isAnalyticsUnavailable(backfilled) {
-                // Provider-specific by design: prepaid balance without usage history is unavailable,
-                // not a confirmed-empty $0 spend row.
-                self.clearTokenSnapshot(for: provider)
-                self.tokenErrors[provider.instanceID] = nil
-            } else if Self.tokenCostRequiresProviderSnapshot(provider) {
-                self.publishConfirmedEmptyTokenSnapshot(for: provider)
-                self.tokenErrors[provider.instanceID] = nil
-            }
+            self.publishTokenSnapshotTransition(for: backfilled, provider: provider)
             self.lastSourceLabels[provider.instanceID] = result.sourceLabel
+            self.applyHuggingFaceWalletOutcome(provider: provider, result: result)
             self.recordProviderFetchSuccessErrorState(provider: provider)
             self.diagnostics[provider.instanceID] = result.diagnostic
             if let tokenAccount = currentTokenAccount, !isHuggingFaceWebWallet {

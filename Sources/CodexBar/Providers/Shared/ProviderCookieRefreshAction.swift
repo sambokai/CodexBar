@@ -24,6 +24,7 @@ enum ProviderCookieRefreshAction {
         additionalVisibility: @escaping () -> Bool = { true },
         resultValidation: ResultValidation = .webSource,
         sourceModeOverride: ProviderSourceMode? = nil,
+        followUpWithOrdinaryRefresh: Bool = false,
         context: ProviderSettingsContext) -> ProviderSettingsActionDescriptor
     {
         ProviderSettingsActionDescriptor(
@@ -37,6 +38,7 @@ enum ProviderCookieRefreshAction {
                         provider: provider,
                         resultValidation: resultValidation,
                         sourceModeOverride: sourceModeOverride,
+                        followUpWithOrdinaryRefresh: followUpWithOrdinaryRefresh,
                         context: context)
                 }
             })
@@ -80,6 +82,7 @@ enum ProviderCookieRefreshAction {
         provider: UsageProvider,
         resultValidation: ResultValidation,
         sourceModeOverride: ProviderSourceMode?,
+        followUpWithOrdinaryRefresh: Bool,
         context: ProviderSettingsContext) async
     {
         context.setStatusText(self.statusID(provider), L("Refreshing"))
@@ -95,7 +98,18 @@ enum ProviderCookieRefreshAction {
                 previousUpdatedAt: previousUpdatedAt,
                 context: context)
         }
-        context.setStatusText(self.statusID(provider), outcome == .refreshed ? nil : L("Failed"))
+        guard outcome == .refreshed else {
+            context.setStatusText(self.statusID(provider), L("Failed"))
+            return
+        }
+        if followUpWithOrdinaryRefresh {
+            // Provider-specific by design (FP-194): Hugging Face validated the Web wallet in
+            // isolation; once the staged cookies have committed, one best-effort ordinary Auto
+            // refresh restores the composed API-spend-plus-wallet snapshot immediately. A broken
+            // API credential must not turn the successful Cookie Refresh into a failure.
+            await context.store.refreshProvider(provider, allowDisabled: true)
+        }
+        context.setStatusText(self.statusID(provider), nil)
     }
 
     private static func resultIsValid(

@@ -163,12 +163,6 @@ final class UsageStore {
         }
     }
 
-    enum CodexCreditsSource {
-        case none
-        case api
-        case dashboardWeb
-    }
-
     var snapshots: [ProviderInstanceID: UsageSnapshot] = [:]
     var errors: [ProviderInstanceID: String] = [:]
     var diagnostics: [ProviderInstanceID: String] = [:]
@@ -176,6 +170,8 @@ final class UsageStore {
     var knownLimitsAvailabilityByProvider: [ProviderInstanceID: UsageLimitsAvailability] = [:]
     var lastSourceLabels: [ProviderInstanceID: String] = [:]
     var lastFetchAttempts: [ProviderInstanceID: [ProviderFetchAttempt]] = [:]
+    // Provider-specific by design: one in-memory provider-level browser wallet, never account-cached.
+    var huggingFaceBrowserWallets: [ProviderInstanceID: HuggingFaceBrowserWalletPublication] = [:]
     var accountSnapshots: [ProviderInstanceID: [TokenAccountUsageSnapshot]] = [:]
     var tokenAccountLiveStateProviders: Set<ProviderInstanceID> = []
     var codexAccountSnapshots: [CodexAccountUsageSnapshot] = []

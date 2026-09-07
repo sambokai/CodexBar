@@ -104,7 +104,9 @@ public enum HuggingFaceProviderDescriptor {
             pipeline: ProviderFetchPipeline(resolveStrategies: { context in
                 switch context.sourceMode {
                 case .api, .cli, .oauth:
-                    [api]
+                    // Swift-owned bearer identity enrichment wraps the billing plugin so identity
+                    // display survives the removal of plugin-owned whoami-v2 probing.
+                    [HuggingFaceAPIUsageStrategy(inner: api)]
                 case .web:
                     [HuggingFaceWebFetchStrategy()]
                 case .auto:
