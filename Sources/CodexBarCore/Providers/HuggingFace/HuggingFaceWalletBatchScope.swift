@@ -119,25 +119,34 @@ public enum HuggingFaceWalletPresentation {
     }
 }
 
-/// Memoizes exactly one browser-wallet observation per refresh batch.
+/// Memoizes exactly one browser-wallet observation per refresh batch and coalesces in-flight
+/// work.
 ///
 /// Stacked token-account fan-out and multi-account CLI runs share one scope so N token accounts
-/// cause at most one billing-page request and one browser `whoami-v2` probe. The memoized value
-/// is a fresh observation for the refresh, not a long-lived balance cache, and the scope holds
-/// no credential data: the cookie header is used transiently inside the fetch closure and the
-/// memoized result contains only balance, timestamp, and matching-layer identity.
+/// cause at most one billing-page request and one browser `whoami-v2` probe. Because Swift
+/// actors are reentrant across `await`, memoizing only the completed result is not enough:
+/// simultaneous callers join the same in-flight operation (see `HuggingFaceSingleFlight`), so
+/// concurrent callers also share one fetch. A cancelled waiter rethrows `CancellationError`
+/// after the shared operation settles; the shared outcome itself is recorded either way, so
+/// cancellation never duplicates requests or loses the batch's single observation. The memoized
+/// value is a fresh observation for the refresh, not a long-lived balance cache, and the scope
+/// holds no credential data: the cookie header is used transiently inside the fetch closure and
+/// the memoized result contains only balance, timestamp, and matching-layer identity.
 public actor HuggingFaceWalletBatchScope {
     public typealias ObservationFetcher = @Sendable (ProviderFetchContext) async throws ->
         HuggingFaceBrowserWalletObservation
 
     private var fetcher: ObservationFetcher?
     private var memo: Result<HuggingFaceBrowserWalletObservation, any Error>?
+    private var inFlight: HuggingFaceSingleFlight<HuggingFaceBrowserWalletObservation>?
 
     public init() {}
 
     /// Returns the batch's single wallet observation, fetching it once. Whichever strategy
     /// arrives first registers its fetcher; within a batch every account uses an identically
-    /// configured strategy, so the registration order is behaviorally irrelevant.
+    /// configured strategy, so the registration order is behaviorally irrelevant. Concurrent
+    /// callers share one in-flight operation; only after it settles do later callers read the
+    /// memo.
     public func observation(
         for context: ProviderFetchContext,
         fetcher: @escaping ObservationFetcher) async throws -> HuggingFaceBrowserWalletObservation
@@ -148,13 +157,40 @@ public actor HuggingFaceWalletBatchScope {
         if let memo = self.memo {
             return try memo.get()
         }
+        let operation: HuggingFaceSingleFlight<HuggingFaceBrowserWalletObservation>
+        if let inFlight = self.inFlight {
+            operation = inFlight
+        } else {
+            let registeredFetcher = self.fetcher!
+            operation = HuggingFaceSingleFlight(task: Task.detached(priority: .userInitiated) {
+                try await registeredFetcher(context)
+            })
+            self.inFlight = operation
+        }
+
+        let outcome: Result<HuggingFaceBrowserWalletObservation, any Error>
         do {
-            let observation = try await self.fetcher!(context)
-            self.memo = .success(observation)
-            return observation
+            outcome = try await .success(operation.task.value)
         } catch {
-            self.memo = .failure(error)
-            throw error
+            outcome = .failure(error)
+        }
+        self.finish(operation: operation, outcome: outcome)
+        // A cancelled waiter follows the caller's cancellation contract: the shared outcome is
+        // still recorded above, but this caller propagates cancellation instead of consuming it.
+        if Task.isCancelled {
+            throw CancellationError()
+        }
+        return try outcome.get()
+    }
+
+    private func finish(
+        operation: HuggingFaceSingleFlight<HuggingFaceBrowserWalletObservation>,
+        outcome: Result<HuggingFaceBrowserWalletObservation, any Error>)
+    {
+        guard self.inFlight === operation else { return }
+        self.inFlight = nil
+        if self.memo == nil {
+            self.memo = outcome
         }
     }
 }
