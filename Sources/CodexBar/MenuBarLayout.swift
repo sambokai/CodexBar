@@ -530,7 +530,8 @@ enum MenuBarLayoutBalanceResolver {
         -> String?
     {
         // Provider-specific by design: Hugging Face's structured wallet balance is provider-owned; this
-        // cluster also retains OpenRouter's detail-row fallback.
+        // cluster also retains OpenRouter's detail-row fallback. The Auto balance is the identity-matched
+        // prepaid wallet composed onto the API snapshot.
         if provider == .huggingface,
            let cost = snapshot?.providerCost,
            let balance = cost.balance

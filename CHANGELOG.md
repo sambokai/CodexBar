@@ -3,12 +3,22 @@
 ## 0.57.1 — Unreleased
 
 ### Added
-- Hugging Face: display the prepaid Credits wallet from an authenticated billing-page session while preserving
-  bearer-token billing-period spend and category details.
+- Hugging Face: show bearer-token billing spend and the browser-session prepaid Credits wallet together in
+  automatic mode. Private cross-authority identity matching (`whoami-v2` opaque user IDs) gates composition;
+  mismatched or unverifiable accounts still show both values, with the wallet labeled as browser-session data.
+  Stacked token-account batches observe the wallet once and only a uniquely matched account composes it.
 
 ### Fixed
 - Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
-  and use the existing bounded browser-access retry for explicit cookie refreshes.
+  use the existing bounded browser-access retry for explicit cookie refreshes, and restore the combined spend and
+  wallet snapshot immediately after a successful refresh instead of waiting for the next cycle.
+- Kiro: route existing overage enrichment to the CLI profile’s supported region instead of always using US East; reject invalid profile ARNs before sending credentials and retain CLI fallback (#3359). Thanks @zucram!
+- Settings: observe rapid external config replacements and edits that restore earlier app-written contents, while keeping successful app writes out of the external-change sync path.
+- Local usage: honor the app’s Low Power Mode interval for automatic Codex catch-up passes in both usage and Spend Dashboard, while retaining manual acceleration and system thermal pauses.
+- z.ai: preserve required quota when optional model analytics exceed display bounds or overflow; retain valid Unicode labels with shared native validation and normalize token inputs once.
+- Claude: recover an expired default-profile cache from changed, fresh CLI credentials when existing read consent and policy permit, preserving explicit-file precedence and custom-profile isolation (related to #3390).
+- Claude local usage: discard stale cached rows when a transcript is atomically replaced, including across process restarts; retain incremental parsing for genuine appends and rebuild legacy cache entries without file identity once.
+- Antigravity local usage: tolerate bookkeeping steps without UUIDs while retaining duplicate bot-ID ambiguity checks, so valid history remains available without assigning uncertain dates (#3462). Thanks @urda!
 
 ## 0.57.0 — 2026-09-08
 

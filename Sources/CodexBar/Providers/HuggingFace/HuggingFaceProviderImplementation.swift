@@ -7,8 +7,13 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
     let id: UsageProvider = .huggingface
 
     @MainActor
-    func presentation(context _: ProviderPresentationContext) -> ProviderPresentation {
-        ProviderPresentation { _ in "api" }
+    func presentation(context: ProviderPresentationContext) -> ProviderPresentation {
+        ProviderPresentation { context in
+            // Provider-specific by design: Auto now reports API spend plus the browser wallet, so
+            // the settings detail line mirrors the live source label instead of a fixed "api".
+            let label = context.store.lastSourceLabels[context.provider.instanceID]
+            return label ?? "api"
+        }
     }
 
     @MainActor
@@ -139,12 +144,13 @@ struct HuggingFaceProviderImplementation: ProviderImplementation {
                         cookieSource: { context.settings.huggingFaceCookieSource },
                         resultValidation: .webProviderCostBalance,
                         sourceModeOverride: .web,
+                        followUpWithOrdinaryRefresh: true,
                         context: context),
                 ]),
             ProviderSettingsPickerDescriptor(
                 id: "huggingface-usage-source",
                 title: "Usage source",
-                subtitle: "Auto uses the API token when available; Browser cookies shows prepaid Credits.",
+                subtitle: "Auto shows API spend plus the browser-session prepaid Credits when both are available.",
                 binding: sourceBinding,
                 options: sourceOptions,
                 isVisible: nil,
