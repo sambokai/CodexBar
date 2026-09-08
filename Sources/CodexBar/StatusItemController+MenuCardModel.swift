@@ -22,8 +22,7 @@ extension StatusItemController {
         planOverride: String? = nil,
         subtitleOverride: String? = nil,
         sourceLabelOverride: String? = nil,
-        creditsOverride: CreditsSnapshot? = nil,
-        projectedSnapshotForTesting: UsageSnapshot? = nil) -> UsageMenuCardView.Model?
+        creditsOverride: CreditsSnapshot? = nil) -> UsageMenuCardView.Model?
     {
         // Provider-specific by design: Codex is the historical card fallback when no enabled provider is available.
         let target = provider ?? self.store.enabledFirstPartyProvidersForDisplay().first ?? .codex
@@ -37,14 +36,10 @@ extension StatusItemController {
         }
         // Override cards belong to a specific account/context. Never fall back to
         // provider-level live data here; that can belong to a different account.
-        let snapshot = if let projectedSnapshotForTesting {
-            projectedSnapshotForTesting
-        } else {
-            self.menuCardSnapshot(
-                provider: target,
-                surface: surface,
-                override: snapshotOverride)
-        }
+        let snapshot = self.menuCardSnapshot(
+            provider: target,
+            surface: surface,
+            override: snapshotOverride)
         let projectedTokenSnapshot = self.store.tokenSnapshot(fromProviderSnapshot: snapshot, provider: target)
         let storedTokenSnapshot = UsageStore.tokenCostRequiresProviderSnapshot(target)
             ? nil
