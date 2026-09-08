@@ -381,19 +381,27 @@ extension UsageStore {
 
         let tokenAccountPreparation = self.tokenAccountRefreshPreparation(for: provider)
         let tokenAccount = self.settings.effectiveSelectedTokenAccount(for: provider)
-        let walletEligibilityContext = self.makeFetchContext(provider: provider, override: nil)
+        let fetchContext = self.makeFetchContext(
+            provider: provider,
+            override: nil,
+            claudeOwnerCLIRecoveryOnly: retryMode == .claudeOwnerCLIRecovery)
         self.prepareHuggingFaceWalletRefresh(
             provider: provider,
-            context: walletEligibilityContext,
+            context: fetchContext,
             selectedTokenAccount: tokenAccount)
 
-        if self.shouldFetchAllTokenAccounts(provider: provider, accounts: tokenAccountPreparation.accounts) {
+        if self.shouldFetchAllTokenAccounts(
+            provider: provider,
+            accounts: tokenAccountPreparation.accounts,
+            sourceMode: fetchContext.sourceMode)
+        {
             await self.refreshTokenAccounts(
                 provider: provider,
                 accounts: tokenAccountPreparation.accounts,
                 generation: generation)
             return nil
-        } else {
+            // Provider-specific by design: Preserve Web authority during this fetch.
+        } else if provider != .huggingface || fetchContext.sourceMode != .web {
             _ = await MainActor.run {
                 self.reconcileSelectedTokenAccountSnapshotBeforeRefresh(
                     provider: provider,
@@ -401,10 +409,6 @@ extension UsageStore {
             }
         }
 
-        let fetchContext = self.makeFetchContext(
-            provider: provider,
-            override: nil,
-            claudeOwnerCLIRecoveryOnly: retryMode == .claudeOwnerCLIRecovery)
         await self._test_refreshFetchContextObserver?(provider, fetchContext)
         let claudeHasAdminAPIKey = ClaudeAdminAPISettingsReader.apiKey(environment: fetchContext.env) != nil
         let claudeActiveAccountIdentitySourceEligible = Self.shouldTrackClaudeActiveAccountIdentity(
@@ -1602,8 +1606,7 @@ extension UsageStore {
     nonisolated static func isPermissionPromptWaiting(_ error: Error) -> Bool {
         let message = error.localizedDescription.lowercased()
         return (message.contains("prompt") && message.contains("waiting")) ||
-            message.contains("permission prompt") ||
-            message.contains("folder trust prompt")
+            message.contains("permission prompt") || message.contains("folder trust prompt")
     }
 
     private func postPermissionPromptNotificationIfNeeded(provider: UsageProvider, error: Error) {
