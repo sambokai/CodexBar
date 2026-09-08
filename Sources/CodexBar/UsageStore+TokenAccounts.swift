@@ -170,16 +170,18 @@ extension UsageStore {
         return self.settings.tokenAccounts(for: provider)
     }
 
-    func shouldFetchAllTokenAccounts(provider: UsageProvider, accounts: [ProviderTokenAccount]) -> Bool {
+    func shouldFetchAllTokenAccounts(
+        provider: UsageProvider,
+        accounts: [ProviderTokenAccount],
+        sourceMode: ProviderSourceMode) -> Bool
+    {
         guard TokenAccountSupportCatalog.support(for: provider) != nil else { return false }
-        guard let selectedAccount = self.settings.effectiveSelectedTokenAccount(for: provider) else { return false }
+        guard self.settings.effectiveSelectedTokenAccount(for: provider) != nil else { return false }
         guard self.settings.multiAccountMenuLayout == .stacked, accounts.count > 1 else { return false }
         guard provider == .huggingface else { return true }
         // Hugging Face's explicit-Web authority (Web mode or Cookie source Refresh's override) has
         // no account ownership proof, so it must not fan out across stacked accounts the way
         // ordinary Auto/API refreshes do. Auto fan-out shares one wallet batch scope.
-        let sourceMode = Self.requestedSourceModeOverride ?? ProviderRegistry.resolvedSourceMode(
-            provider: provider, settings: self.settings, account: selectedAccount)
         return sourceMode != .web
     }
 

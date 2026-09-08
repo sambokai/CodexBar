@@ -17,6 +17,7 @@ private actor HuggingFaceAuthorityFetchRecorder {
     private(set) var apiRequests: [Request] = []
     private(set) var webRequests: [Request] = []
     var apiFailureMode = false
+    var webFailureMode = false
     var composedAccountID: UUID?
 
     func recordAPI(_ context: ProviderFetchContext) {
@@ -29,6 +30,10 @@ private actor HuggingFaceAuthorityFetchRecorder {
 
     func setAPIFailureMode(_ enabled: Bool) {
         self.apiFailureMode = enabled
+    }
+
+    func setWebFailureMode(_ enabled: Bool) {
+        self.webFailureMode = enabled
     }
 
     func setComposedAccountID(_ id: UUID?) {
@@ -108,6 +113,9 @@ private struct HuggingFaceWebStubStrategy: ProviderFetchStrategy {
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         await self.recorder.recordWeb(context)
+        guard await !self.recorder.webFailureMode else {
+            throw ProviderPluginError.script("fixture Web outage")
+        }
         let cost = ProviderCostSnapshot(
             used: 0,
             limit: 0,
@@ -317,6 +325,79 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
         #expect(publication.balanceUSD == 42)
         #expect(publication.attribution == .webSession)
         #expect(store.accountSnapshots[.huggingface]?.count == 2)
+    }
+
+    @Test
+    func `explicit web failure preserves Web snapshot over a populated selected API cache`() async throws {
+        let settings = Self.makeSettings(suite: "hf-web-authority-explicit-web-failure")
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        let recorder = HuggingFaceAuthorityFetchRecorder()
+        let store = try Self.makeStore(settings: settings, recorder: recorder)
+
+        // Populate the selected API-account cache through the production Auto route.
+        await store.refreshProvider(.huggingface)
+        let cached = try #require(store.accountSnapshots[.huggingface]?.first)
+        #expect(cached.sourceLabel == "api")
+        #expect(cached.snapshot?.accountEmail(for: .huggingface) == "Personal")
+
+        // A successful explicit Web refresh becomes the provider-owned live authority.
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+        let priorWeb = try #require(store.snapshot(for: .huggingface))
+        let priorWallet = try #require(store.huggingFaceWebOwnedWallets[.huggingface])
+        #expect(priorWeb.providerCost?.balance == 42)
+        #expect(store.lastSourceLabels[.huggingface] == "web")
+
+        // A second explicit Web failure must not activate the selected API cache first.
+        await recorder.setWebFailureMode(true)
+        await store.refreshProvider(.huggingface, allowDisabled: true, sourceModeOverride: .web)
+
+        let retained = try #require(store.snapshot(for: .huggingface))
+        #expect(retained.providerCost?.balance == priorWeb.providerCost?.balance)
+        #expect(retained.updatedAt == priorWeb.updatedAt)
+        #expect(retained.accountEmail(for: .huggingface) != "Personal")
+        #expect(store.lastSourceLabels[.huggingface] == "web")
+        #expect(store.accountSnapshots[.huggingface]?.first?.snapshot?.accountEmail(for: .huggingface) == "Personal")
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        #expect(store.huggingFaceWebOwnedWallets[.huggingface] == priorWallet)
+        #expect(store.huggingFaceLiveWebSnapshotOwners == [.huggingface])
+        #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
+    }
+
+    @Test
+    func `persisted web failure preserves Web snapshot over a populated selected API cache`() async throws {
+        let settings = Self.makeSettings(suite: "hf-web-authority-persisted-web-failure")
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        let recorder = HuggingFaceAuthorityFetchRecorder()
+        let store = try Self.makeStore(settings: settings, recorder: recorder)
+
+        // First populate the selected API-account cache while the persisted source is Auto.
+        await store.refreshProvider(.huggingface)
+        let cached = try #require(store.accountSnapshots[.huggingface]?.first)
+        #expect(cached.sourceLabel == "api")
+        #expect(cached.snapshot?.accountEmail(for: .huggingface) == "Personal")
+
+        // Select Web through persisted provider configuration, then publish its live snapshot.
+        settings.huggingFaceUsageDataSource = .web
+        await store.refreshProvider(.huggingface, allowDisabled: true)
+        let priorWeb = try #require(store.snapshot(for: .huggingface))
+        let priorWallet = try #require(store.huggingFaceWebOwnedWallets[.huggingface])
+        #expect(priorWeb.providerCost?.balance == 42)
+        #expect(store.lastSourceLabels[.huggingface] == "web")
+
+        // A later persisted-Web failure must retain Web authority and never reveal the API cache.
+        await recorder.setWebFailureMode(true)
+        await store.refreshProvider(.huggingface, allowDisabled: true)
+
+        let retained = try #require(store.snapshot(for: .huggingface))
+        #expect(retained.providerCost?.balance == priorWeb.providerCost?.balance)
+        #expect(retained.updatedAt == priorWeb.updatedAt)
+        #expect(retained.accountEmail(for: .huggingface) != "Personal")
+        #expect(store.lastSourceLabels[.huggingface] == "web")
+        #expect(store.accountSnapshots[.huggingface]?.first?.snapshot?.accountEmail(for: .huggingface) == "Personal")
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
+        #expect(store.huggingFaceWebOwnedWallets[.huggingface] == priorWallet)
+        #expect(store.huggingFaceLiveWebSnapshotOwners == [.huggingface])
+        #expect(store.huggingFacePendingWebSnapshotDisplacement.isEmpty)
     }
 
     @Test
