@@ -125,18 +125,14 @@ struct HuggingFaceMenuWalletPresentationTests {
             observedAt: Date(timeIntervalSince1970: 1_777_000_000),
             attribution: .webSession)
 
-        let resolved = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
-            store: fixture.store,
+        let model = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
             controller: fixture.controller))
-        guard case let .assembled(model) = resolved else {
-            Issue.record("Expected the assembled live-card model")
-            return
-        }
 
         // Exactly one browser-session wallet, carried by a snapshot that manufactures no API spend
         // and no account identity.
         let sections = model.providerDetails.filter { $0.title == "Browser session wallet" }
         #expect(sections.count == 1)
+        #expect(sections[0].rows.map(\.label) == ["Prepaid credits", "Account"])
         #expect(sections[0].rows.map(\.value) == ["$42.00", "From browser session · API account not verified"])
         #expect(model.providerCost?.spendLine == nil || !model.providerCost!.spendLine.contains("$"))
     }
@@ -149,17 +145,15 @@ struct HuggingFaceMenuWalletPresentationTests {
             observedAt: Date(timeIntervalSince1970: 1_777_000_000),
             attribution: .webSession)
 
-        let resolved = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
-            store: fixture.store,
+        let model = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
             controller: fixture.controller))
-        guard case let .assembled(model) = resolved else {
-            Issue.record("Expected the assembled live-card model")
-            return
-        }
 
         let sections = model.providerDetails.filter { $0.title == "Browser session wallet" }
         #expect(sections.count == 1)
-        #expect(model.providerCost != nil)
+        #expect(sections[0].rows.map(\.label) == ["Prepaid credits", "Account"])
+        #expect(sections[0].rows.map(\.value) == ["$42.00", "From browser session · API account not verified"])
+        #expect(model.providerCost?.title == "API spend")
+        #expect(model.providerCost?.spendLine == "Reported billing period: $12.00")
     }
 
     @Test
@@ -167,13 +161,8 @@ struct HuggingFaceMenuWalletPresentationTests {
         let fixture = try Self.makeFixture(suite: "hf-menu-no-wallet", accountCount: 1)
         #expect(fixture.store.huggingFaceBrowserWallets[.huggingface] == nil)
 
-        let resolved = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
-            store: fixture.store,
+        let model = try #require(HuggingFaceMenuWalletPresentationTests.liveMenuModelFixture(
             controller: fixture.controller))
-        guard case let .assembled(model) = resolved else {
-            Issue.record("Expected the assembled live-card model")
-            return
-        }
         #expect(!model.providerDetails.contains { $0.title == "Browser session wallet" })
     }
 
@@ -233,18 +222,17 @@ struct HuggingFaceMenuWalletPresentationTests {
         #expect(publication.balanceUSD == 42)
         #expect(publication.attribution == .webSession)
 
-        let resolved = try #require(Self.liveMenuModelFixture(store: store, controller: nil))
-        guard case let .projected(projected) = resolved else {
-            Issue.record("Expected the controller-less wallet projection")
-            return
-        }
-        #expect(projected.sections.count == 1)
-        #expect(projected.sections[0].rows.map(\.value) == [
+        let controller = Self.makeController(store: store, settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
+        let model = try #require(Self.liveMenuModelFixture(controller: controller))
+        let sections = model.providerDetails.filter { $0.title == "Browser session wallet" }
+        #expect(sections.count == 1)
+        #expect(sections[0].rows.map(\.value) == [
             "$42.00",
             "From browser session · API account not verified",
         ])
         // The carrier manufactures no spend of its own.
-        #expect(projected.hasCost == false)
+        #expect(model.providerCost == nil)
     }
 
     @Test
@@ -354,6 +342,17 @@ struct HuggingFaceMenuWalletPresentationTests {
             tokenAccountStore: InMemoryTokenAccountStore())
     }
 
+    private static func makeController(store: UsageStore, settings: SettingsStore) -> StatusItemController {
+        let fetcher = UsageFetcher(environment: [:])
+        return StatusItemController(
+            store: store,
+            settings: settings,
+            account: fetcher.loadAccountInfo(),
+            updater: DisabledUpdaterController(),
+            preferencesSelection: PreferencesSelection(),
+            statusBar: testStatusBar())
+    }
+
     private static func makeFixture(
         suite: String,
         accountCount: Int,
@@ -455,69 +454,13 @@ struct HuggingFaceMenuWalletPresentationTests {
 
     // MARK: Recovery-matrix fixtures
 
-    private enum LiveMenuModel {
-        case assembled(UsageMenuCardView.Model)
-        case projected(ProjectedWallet)
-    }
-
     /// Projects the live-card wallet surface for Hugging Face through the same seams as the real
-    /// menu: the store's base snapshot plus the provider-level wallet projection, followed by the
-    /// full `menuCardModel(for:)` assembly so render-relevant fields such as the cost row and
-    /// provider details are exercised end to end.
+    /// menu, using the full `menuCardModel(for:)` assembly so render-relevant fields such as the
+    /// cost row and provider details are exercised end to end.
     private static func liveMenuModelFixture(
-        store: UsageStore,
-        controller: StatusItemController?) -> LiveMenuModel?
+        controller: StatusItemController) -> UsageMenuCardView.Model?
     {
-        let projected = Self.huggingFaceProviderWalletSnapshotForTesting(store: store)
-        if let controller {
-            guard let model = controller.menuCardModel(
-                for: .huggingface,
-                projectedSnapshotForTesting: projected)
-            else { return nil }
-            return .assembled(model)
-        }
-        guard let wallet = Self.assemblyOnlyMenuModelFixture(projected: projected) else {
-            return nil
-        }
-        return .projected(wallet)
-    }
-
-    /// Controller-less live-card wallet projection: the wallet sections from the real
-    /// `recoveryCarrierSnapshot`/`appendingDetailSection` seams plus whether the carrier
-    /// manufactured spend of its own (`true`) or stayed spend-free (`false`).
-    private struct ProjectedWallet {
-        let sections: [ProviderDetailSection]
-        let hasCost: Bool
-    }
-
-    /// Reprojects the wallet-carrying snapshot through the real section-rendering seam: the
-    /// snapshot's wallet detail section is the exact value the live menu card's details row set
-    /// uses, while the returned cost presence flag records whether the carrier manufactured any
-    /// spend of its own. Any divergence between this seam and the real `providerCost` assembly
-    /// fails the explicitly asserted cost fields of each calling test.
-    private static func assemblyOnlyMenuModelFixture(
-        projected: UsageSnapshot?) -> ProjectedWallet?
-    {
-        guard let projected else { return nil }
-        let sections = projected.details.filter { $0.title == "Browser session wallet" }
-        guard sections.count == 1 else { return nil }
-        return ProjectedWallet(sections: sections, hasCost: projected.providerCost != nil)
-    }
-
-    /// Test-local replica of the controller's provider-level wallet projection. Mirrors the
-    /// `huggingFaceProviderWalletSnapshot` rules exactly: append to the live base snapshot when one
-    /// exists, otherwise ride the minimal identity-less carrier snapshot.
-    private static func huggingFaceProviderWalletSnapshotForTesting(
-        store: UsageStore) -> UsageSnapshot?
-    {
-        guard let publication = store.huggingFaceBrowserWallets[.huggingface],
-              HuggingFaceWalletPresentation.detailSection(publication) != nil
-        else { return store.presentationSnapshot(for: .huggingface) }
-        let base = store.presentationSnapshot(for: .huggingface)
-        if let base {
-            return base.appendingDetailSection(HuggingFaceWalletPresentation.detailSection(publication)!)
-        }
-        return HuggingFaceWalletPresentation.recoveryCarrierSnapshot(publication)
+        controller.menuCardModel(for: .huggingface)
     }
 
     private final class APIFailureFlag: @unchecked Sendable {
