@@ -602,10 +602,10 @@ extension UsageStore {
             accounts: limitedAccounts,
             huggingFaceWalletBatchScope: huggingFaceWalletScope)
         guard self.isCurrentProviderRefreshGeneration(provider, generation: generation) else { return }
-        let reconciledResults = provider == .huggingface
+        let walletReconciliation: HuggingFaceWalletAttributionReconciliation? = provider == .huggingface
             ? self.reconcileHuggingFaceWalletAttribution(results)
-            : results
-        for result in reconciledResults {
+            : nil
+        for result in walletReconciliation?.results ?? results {
             guard let account = self.uniqueTokenAccount(provider: provider, accountID: result.account.id)
             else { continue }
             let outcome = result.outcome
@@ -617,7 +617,7 @@ extension UsageStore {
                 outcome,
                 provider: provider,
                 account: account,
-                priorSnapshot: priorByAccountID[account.id])
+                priorSnapshot: self.reconcileHuggingFacePrior(priorByAccountID[account.id], walletReconciliation))
             if let snapshot = resolved.snapshot {
                 snapshots.append(snapshot)
             }

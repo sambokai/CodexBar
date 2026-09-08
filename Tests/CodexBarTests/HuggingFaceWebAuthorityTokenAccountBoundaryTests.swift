@@ -17,6 +17,7 @@ private actor HuggingFaceAuthorityFetchRecorder {
     private(set) var apiRequests: [Request] = []
     private(set) var webRequests: [Request] = []
     var apiFailureMode = false
+    var apiFailureAccountIDs: Set<UUID> = []
     var webFailureMode = false
     var composedAccountID: UUID?
 
@@ -30,6 +31,15 @@ private actor HuggingFaceAuthorityFetchRecorder {
 
     func setAPIFailureMode(_ enabled: Bool) {
         self.apiFailureMode = enabled
+    }
+
+    func setAPIFailureAccountIDs(_ ids: Set<UUID>) {
+        self.apiFailureAccountIDs = ids
+    }
+
+    func shouldTimeOutAPI(for accountID: UUID?) -> Bool {
+        guard let accountID else { return false }
+        return self.apiFailureAccountIDs.contains(accountID)
     }
 
     func setWebFailureMode(_ enabled: Bool) {
@@ -54,6 +64,9 @@ private struct HuggingFaceAPIStubStrategy: ProviderFetchStrategy {
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         await self.recorder.recordAPI(context)
+        if await self.recorder.shouldTimeOutAPI(for: context.selectedTokenAccountID) {
+            throw URLError(.timedOut)
+        }
         guard await !self.recorder.apiFailureMode else {
             throw ProviderPluginError.script("fixture API outage")
         }
@@ -204,6 +217,43 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
         let snapshots = try #require(store.accountSnapshots[.huggingface])
         #expect(snapshots.map(\.account.id) == accounts.map(\.id))
         #expect(snapshots.map { $0.snapshot?.accountEmail(for: .huggingface) } == ["Personal", "Work"])
+    }
+
+    @Test
+    func `partial stacked refresh reconciles retained wallet before publishing account snapshots`() async throws {
+        let settings = Self.makeSettings(suite: "hf-web-authority-partial-refresh")
+        settings.multiAccountMenuLayout = .stacked
+        settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
+        settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        let accounts = settings.tokenAccounts(for: .huggingface)
+        let recorder = HuggingFaceAuthorityFetchRecorder()
+        let store = try Self.makeStore(settings: settings, recorder: recorder)
+
+        // First refresh: only Personal receives the locally matched composition.
+        await recorder.setComposedAccountID(accounts[0].id)
+        await store.refreshProvider(.huggingface)
+        let initial = try #require(store.accountSnapshots[.huggingface])
+        #expect(initial[0].snapshot?.providerCost?.balance == 42)
+        #expect(initial[0].sourceLabel == "api+web")
+        #expect(initial[1].snapshot?.providerCost?.balance == nil)
+        #expect(initial[1].sourceLabel == "api")
+
+        // Second refresh: Personal times out while Work receives the fresh unique composition.
+        await recorder.setComposedAccountID(accounts[1].id)
+        await recorder.setAPIFailureAccountIDs([accounts[0].id])
+        await store.refreshProvider(.huggingface)
+
+        let refreshed = try #require(store.accountSnapshots[.huggingface])
+        let personal = try #require(refreshed.first { $0.account.id == accounts[0].id })
+        let work = try #require(refreshed.first { $0.account.id == accounts[1].id })
+        // Cached API spend survives the timeout, but the old browser wallet attribution does not.
+        #expect(personal.snapshot?.providerCost?.used == 12)
+        #expect(personal.snapshot?.providerCost?.balance == nil)
+        #expect(personal.sourceLabel == "api")
+        #expect(work.snapshot?.providerCost?.balance == 42)
+        #expect(work.sourceLabel == "api+web")
+        #expect(refreshed.count(where: { $0.snapshot?.providerCost?.balance != nil }) == 1)
+        #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
     }
 
     @Test

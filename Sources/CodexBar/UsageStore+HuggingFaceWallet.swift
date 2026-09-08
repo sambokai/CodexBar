@@ -5,6 +5,12 @@ import Foundation
 // value. These helpers own its deterministic publication, configuration-driven clearing, and the
 // stacked-batch attribution post-pass. The wallet is never cached as a token-account snapshot.
 
+struct HuggingFaceWalletAttributionReconciliation {
+    let results: [TokenAccountFetchResult]
+    let decision: HuggingFaceWalletBatchDecision
+    let composedAccountID: UUID?
+}
+
 extension UsageStore {
     /// Reconciles Hugging Face's provider-level Web wallet before refresh routing branches into
     /// stacked fan-out or ordinary selected-account reconciliation. Explicit Web never displaces
@@ -86,7 +92,7 @@ extension UsageStore {
     ///   clear on attempted-and-unavailable or not-attempted outcomes, and make no transition when
     ///   every fetch failed before wallet work (no outcome payload).
     func reconcileHuggingFaceWalletAttribution(
-        _ results: [TokenAccountFetchResult]) -> [TokenAccountFetchResult]
+        _ results: [TokenAccountFetchResult]) -> HuggingFaceWalletAttributionReconciliation
     {
         // Provider-specific by design: Hugging Face's wallet is one provider-level browser value.
         let walletOutcomes = results.map { result -> HuggingFaceBrowserWalletOutcome? in
@@ -134,7 +140,49 @@ extension UsageStore {
         case .noTransition:
             break
         }
-        return rewritten
+        let composedAccountIDs = results.compactMap { result -> UUID? in
+            guard case let .success(fetchResult) = result.outcome.result,
+                  fetchResult.huggingFaceWalletOutcome?.isLocalMatchComposed == true
+            else { return nil }
+            return result.account.id
+        }
+        let composedAccountID: UUID? = if case .composedOnAccount = reconciled.decision,
+                                          composedAccountIDs.count == 1
+        {
+            composedAccountIDs[0]
+        } else {
+            nil
+        }
+        return HuggingFaceWalletAttributionReconciliation(
+            results: rewritten,
+            decision: reconciled.decision,
+            composedAccountID: composedAccountID)
+    }
+
+    /// Applies the fresh batch decision to a prior account snapshot restored after a failed fetch.
+    /// A retained Hugging Face wallet is only valid when the current batch still gives that account
+    /// the unique composition. Otherwise, preserve the API spend and remove the browser-wallet
+    /// balance and its `api+web` attribution together.
+    func reconcileHuggingFacePrior(
+        _ snapshot: TokenAccountUsageSnapshot?,
+        _ reconciliation: HuggingFaceWalletAttributionReconciliation?) -> TokenAccountUsageSnapshot?
+    {
+        guard let snapshot, let reconciliation else { return snapshot }
+        let shouldStripWallet: Bool = switch reconciliation.decision {
+        case .composedOnAccount:
+            reconciliation.composedAccountID.map { $0 != snapshot.account.id } ?? true
+        case .providerLevel, .clear:
+            true
+        case .noTransition:
+            false
+        }
+        guard shouldStripWallet, snapshot.sourceLabel == "api+web" else { return snapshot }
+        return TokenAccountUsageSnapshot(
+            account: snapshot.account,
+            snapshot: snapshot.snapshot.map(HuggingFaceWalletBatchReconciliation.strippingWalletBalance),
+            error: snapshot.error,
+            sourceLabel: "api",
+            cacheKey: snapshot.cacheKey)
     }
 
     /// Provider-specific by design (FP-194): recovery publication for a failed Auto/API refresh
