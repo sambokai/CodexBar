@@ -1321,15 +1321,15 @@ extension UsageStore {
         sourceLabel: String?,
         hadPriorData: Bool)
     {
-        guard let message = self.tokenAccountErrorMessage(error) else {
-            self.errors[provider.instanceID] = nil
-            return
-        }
         if let snapshot {
             self.snapshots[provider.instanceID] = snapshot
             self.lastKnownResetSnapshots[provider.instanceID] = snapshot
             self.lastSourceLabels[provider.instanceID] = sourceLabel
             self.installProviderDerivedTokenSnapshot(from: snapshot, for: provider)
+        }
+        guard let message = self.tokenAccountErrorMessage(error) else {
+            self.errors[provider.instanceID] = nil
+            return
         }
         let shouldSurface = self.failureGates[provider.instanceID]?
             .shouldSurfaceError(onFailureWithPriorData: hadPriorData) ?? true

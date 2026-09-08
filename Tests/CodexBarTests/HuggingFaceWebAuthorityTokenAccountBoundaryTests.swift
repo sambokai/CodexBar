@@ -17,7 +17,7 @@ private actor HuggingFaceAuthorityFetchRecorder {
     private(set) var apiRequests: [Request] = []
     private(set) var webRequests: [Request] = []
     var apiFailureMode = false
-    var apiFailureAccountIDs: Set<UUID> = []
+    var apiCancellationAccountIDs: Set<UUID> = []
     var webFailureMode = false
     var composedAccountID: UUID?
 
@@ -33,13 +33,13 @@ private actor HuggingFaceAuthorityFetchRecorder {
         self.apiFailureMode = enabled
     }
 
-    func setAPIFailureAccountIDs(_ ids: Set<UUID>) {
-        self.apiFailureAccountIDs = ids
+    func setAPICancellationAccountIDs(_ ids: Set<UUID>) {
+        self.apiCancellationAccountIDs = ids
     }
 
-    func shouldTimeOutAPI(for accountID: UUID?) -> Bool {
+    func shouldCancelAPI(for accountID: UUID?) -> Bool {
         guard let accountID else { return false }
-        return self.apiFailureAccountIDs.contains(accountID)
+        return self.apiCancellationAccountIDs.contains(accountID)
     }
 
     func setWebFailureMode(_ enabled: Bool) {
@@ -64,8 +64,8 @@ private struct HuggingFaceAPIStubStrategy: ProviderFetchStrategy {
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
         await self.recorder.recordAPI(context)
-        if await self.recorder.shouldTimeOutAPI(for: context.selectedTokenAccountID) {
-            throw URLError(.timedOut)
+        if await self.recorder.shouldCancelAPI(for: context.selectedTokenAccountID) {
+            throw CancellationError()
         }
         guard await !self.recorder.apiFailureMode else {
             throw ProviderPluginError.script("fixture API outage")
@@ -225,6 +225,7 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
         settings.multiAccountMenuLayout = .stacked
         settings.addTokenAccount(provider: .huggingface, label: "Personal", token: "hf_personal_token")
         settings.addTokenAccount(provider: .huggingface, label: "Work", token: "hf_work_token")
+        settings.setActiveTokenAccountIndex(0, for: .huggingface)
         let accounts = settings.tokenAccounts(for: .huggingface)
         let recorder = HuggingFaceAuthorityFetchRecorder()
         let store = try Self.makeStore(settings: settings, recorder: recorder)
@@ -238,21 +239,26 @@ struct HuggingFaceWebAuthorityTokenAccountBoundaryTests {
         #expect(initial[1].snapshot?.providerCost?.balance == nil)
         #expect(initial[1].sourceLabel == "api")
 
-        // Second refresh: Personal times out while Work receives the fresh unique composition.
+        // Second refresh: Personal is cancelled while Work receives the fresh unique composition.
         await recorder.setComposedAccountID(accounts[1].id)
-        await recorder.setAPIFailureAccountIDs([accounts[0].id])
+        await recorder.setAPICancellationAccountIDs([accounts[0].id])
         await store.refreshProvider(.huggingface)
 
         let refreshed = try #require(store.accountSnapshots[.huggingface])
         let personal = try #require(refreshed.first { $0.account.id == accounts[0].id })
         let work = try #require(refreshed.first { $0.account.id == accounts[1].id })
-        // Cached API spend survives the timeout, but the old browser wallet attribution does not.
+        // Cached API spend survives cancellation, but the old browser wallet attribution does not.
         #expect(personal.snapshot?.providerCost?.used == 12)
         #expect(personal.snapshot?.providerCost?.balance == nil)
         #expect(personal.sourceLabel == "api")
         #expect(work.snapshot?.providerCost?.balance == 42)
         #expect(work.sourceLabel == "api+web")
         #expect(refreshed.count(where: { $0.snapshot?.providerCost?.balance != nil }) == 1)
+        let live = try #require(store.snapshot(for: .huggingface))
+        #expect(live.accountEmail(for: .huggingface) == "Personal")
+        #expect(live.providerCost?.used == 12)
+        #expect(live.providerCost?.balance == nil)
+        #expect(store.lastSourceLabels[.huggingface] == "api")
         #expect(store.huggingFaceBrowserWallets[.huggingface] == nil)
     }
 
