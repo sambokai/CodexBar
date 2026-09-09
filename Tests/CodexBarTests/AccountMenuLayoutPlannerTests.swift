@@ -90,6 +90,36 @@ struct AccountMenuLayoutPlannerTests {
     }
 
     @Test
+    func `hidden compact details preserve quota ranking and choose later visible windows`() throws {
+        let accounts = [
+            self.account(slot: 1, email: "active@example.com", isActive: true, sessionUsed: 20),
+            self.account(
+                slot: 2,
+                email: "constrained@example.com",
+                sessionUsed: 99,
+                weeklyUsed: 80,
+                scopedUsed: [("Fable", 98)]),
+            self.account(slot: 3, email: "other@example.com", sessionUsed: 40),
+            self.account(slot: 4, email: "best@example.com", sessionUsed: 10),
+        ]
+        let original = self.compactRows(in: AccountMenuLayoutPlanner.plan(accounts: accounts))
+        let filtered = self.compactRows(in: AccountMenuLayoutPlanner.plan(
+            accounts: accounts,
+            hiddenMetricIDs: ["primary", "claude-weekly-scoped-fable"]))
+        #expect(filtered.map(\.accountID) == original.map(\.accountID))
+        #expect(filtered.map(\.headroomPercent) == original.map(\.headroomPercent))
+        #expect(filtered.map(\.isBestCandidate) == original.map(\.isBestCandidate))
+        let row = try #require(filtered.first { $0.accountID == accounts[1].id })
+        #expect(row.constraintDetail == "Weekly 20%")
+        #expect(row.headroomPercent == 1)
+        #expect(row.severity == .critical)
+        let hidden = self.compactRows(in: AccountMenuLayoutPlanner.plan(
+            accounts: accounts,
+            hiddenMetricIDs: ["primary", "secondary", "claude-weekly-scoped-fable"]))
+        #expect(hidden.allSatisfy { $0.constraintDetail == nil })
+    }
+
+    @Test
     func `fewer than four accounts keeps stacked cards`() {
         let accounts = [
             self.account(slot: 1, email: "a@example.com", isActive: true, sessionUsed: 10),

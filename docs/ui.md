@@ -27,6 +27,12 @@ read_when:
 - Display → Menu Bar → Layout provides presets plus a token editor. Tokens can be clicked to append, dragged from the
   palette, reordered between one or two lines, dragged out, or removed with Delete. Layouts can be global or overridden
   per provider. Manual edits select the Custom preset.
+- Time tokens offer Session and Weekly variants of Resets in and Reset at, including in conditional branches.
+  The original unqualified reset tokens continue to follow the automatic window. A selected window that is
+  unavailable displays a dash rather than substituting another window. Saved layouts use V3 keys alongside a
+  v0.56.8-readable V2 projection, which omits the new tokens and conditional rules that use them while preserving
+  existing conditional placements, direct lane selections, and other providers' overrides. Re-upgrading restores
+  the full layout unless an older release changed its saved projection. The oldest-format projection is also retained.
 - All providers previews the default layout and lists enabled providers with saved overrides, even when an override
   currently matches the default. Each “Use all-providers layout” action removes only that provider's override;
   global edits preserve overrides, and disabled providers are left untouched. Before a default is first saved,
@@ -41,7 +47,7 @@ read_when:
 | Identity | Icon, Provider name, Account | Provider-scoped branding and identity |
 | Usage | Session %, Weekly %, Scoped weekly %, Auto %, Usage bar | Window percentage or a compact three-glyph usage bar |
 | Usage | Session pace, Weekly pace, Auto pace | Signed pace delta for that window |
-| Time | Resets in, Reset at, Runs out | Relative reset, absolute reset, or pace estimate |
+| Time | Resets in, Reset at (automatic, Session, Weekly), Runs out | Selected-window relative reset, absolute reset, or pace estimate |
 | Money | Balance, Cost today, Cost 30d | OpenRouter credit balance, or local cost estimate for the selected period |
 | Structure | Separator dot, Space, Line break | Spacing and optional two-line composition |
 
@@ -128,3 +134,25 @@ Runs out tokens remain hidden until 3% of their window has elapsed.
 See also: `docs/widgets.md`.
 
 Cost-history submenus keep tall histories in a scrollable viewport. Switching Token/Cost preserves the viewport; scrolling over the chart moves through the history without moving the native menu.
+
+### Provider percent window
+
+In Icon and Percent mode, provider settings expose an Auto, Session, or Weekly picker when the provider supports multiple quota windows. The choice updates top-level percent tokens in that provider’s layout. Conditional tokens and other providers’ layouts remain independent; use the layout editor for mixed percent windows.
+
+### Inline cost chart inspection
+
+Hover over a daily bar in a provider menu’s cost chart to inspect its date, cost, and token count. The highlighted day follows the pointer and clears when it leaves the chart; missing or unpriced values remain unavailable. This does not change cost collection or Settings charts.
+
+### Daily spend ledger
+
+Usage & Spend includes a daily ledger for each currency group. Rows use the selected bucket time zone and app language, retain priced days when another day is unpriced, and mark unavailable amounts with a dash. Zero-usage rows require established common coverage; unknown activity is not described as idle. Narrow settings windows allow horizontal ledger scrolling. Source filtering and dashboard accounting remain authoritative.
+
+OpenCodex cost and request aggregates cover the selected history window, including All; older activity remains included alongside its token counts.
+
+### Per-provider usage visibility
+
+In each provider’s settings, **Visible usage items** selects which reported quota, usage, and credit rows appear in its menu, preview, and Overview. Rows are visible by default. Hidden rows that temporarily stop reporting remain individually restorable; **Restore Defaults** shows all rows again. These presentation choices sync with provider settings and do not change fetching, alerts, or quota calculations.
+
+Usage-row visibility also filters compact account constraint details. Overall account headroom, severity, ordering, and recommendations continue to use all quotas.
+
+Visibility and accent-color changes preserve account cache identity and retained spend, including when the changes arrive through config reload or sync. Credential and endpoint changes still invalidate their previous usage ownership.

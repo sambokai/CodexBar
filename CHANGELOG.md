@@ -3,6 +3,11 @@
 ## 0.57.1 — Unreleased
 
 ### Added
+- Provider menus: choose visible usage rows per provider across full and compact menus, Settings previews, and Overview; retain hidden unavailable rows for restoration and sync selections without changing fetching or alerts (#3196, #3182). Thanks @psufka and @J2TeamNNL!
+- Menu bar: choose Auto, Session, or Weekly percent windows in provider settings while preserving custom layout tokens and the global icon style (#3124). Thanks @J2TeamNNL!
+- Menu bar layouts: choose session or weekly reset countdowns and clocks, including conditional branches; preserve older layouts, schedule visible countdown changes, and avoid repeated VoiceOver wording (#3481, #3356). Thanks @vincent-peng!
+- Inline cost charts: inspect each day’s localized date, cost, and token count by hovering over its bar, with a stable chart layout and unavailable values kept distinct (#3413). Thanks @666ghj!
+- Usage & Spend: inspect a daily provider ledger with tokens, requests, and spend; preserve unknown amounts, common coverage, selected time zones, and existing dashboard views (#2635). Thanks @sahilaidev!
 - Hugging Face: show bearer-token billing spend and the browser-session prepaid Credits wallet together in
   automatic mode. Private cross-authority identity matching (`whoami-v2` opaque user IDs) gates composition;
   mismatched or unverifiable accounts still show both values, with the wallet labeled as browser-session data.
@@ -19,6 +24,10 @@
 - Hugging Face: make Cookie-source Refresh import and validate browser credits even when optional usage is hidden,
   use the existing bounded browser-access retry for explicit cookie refreshes, and restore the combined spend and
   wallet snapshot immediately after a successful refresh instead of waiting for the next cycle.
+- OpenCodex local usage: aggregate costs and requests over the full requested history so All-history spend and daily ledger counts remain available (#2635).
+- Codex local costs: exclude inherited records before an explicit subagent history boundary, including files with no child-owned usage yet, and refresh older cached counts without discarding stored history (related to #3524). Thanks @vnnkl!
+- Token counts: promote rounded `1000K` and `1000M` values to `1M` and `1B`, preserve ordinary precision, and handle the full signed integer range without crashing (#3519, fixes #3518). Thanks @harjothkhara!
+- Development: fail before Swift test discovery when Python lacks process-containment APIs, name the interpreter and missing capabilities, and document how to select a compatible Python (#3517, fixes #3515). Thanks @devYRPauli!
 
 ## 0.57.0 — 2026-09-08
 
